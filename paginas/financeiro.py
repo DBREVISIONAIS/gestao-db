@@ -91,11 +91,29 @@ def metas(clientes: pd.DataFrame) -> None:
 
     # Pipeline: cliente com valor previsto que ainda não foi ajuizado.
     # É o que está parado fora do protocolo e pode virar realizado.
-    pipeline = clientes[
+    #
+    # O recorte por status importa: sem ele o pipeline pega desde caso
+    # em checklist antigo até pré-descarte, o que superestima a chance
+    # de bater a meta.
+    disponivel = clientes[
         (~clientes["ajuizado"])
         & (clientes["honorario_total"] > 0)
         & (~clientes["encerrado"])
     ].copy()
+
+    etapas = sorted(disponivel["status"].dropna().unique())
+    padrao = [
+        e for e in etapas
+        if any(t in e for t in ("MINUTA", "ESTRAT", "REVIS", "PROTOCOLAR"))
+    ] or etapas
+
+    cenario = st.multiselect(
+        "Cenário do pipeline: quais etapas contam como próximas do protocolo",
+        etapas,
+        default=padrao,
+        key="meta_cenario",
+    )
+    pipeline = disponivel[disponivel["status"].isin(cenario)] if cenario else disponivel
     valor_pipeline = float(pipeline["honorario_total"].sum())
 
     hoje = date.today()
@@ -106,8 +124,11 @@ def metas(clientes: pd.DataFrame) -> None:
               f"{len(ajuizados)} ajuizamento(s) em {ano}.")
     ui.cartao(colunas[1], "Falta para a meta", formatar_moeda(falta),
               f"{percentual:.1f}% da meta atingido.".replace(".", ","))
-    ui.cartao(colunas[2], "Parado fora do protocolo", formatar_moeda(valor_pipeline),
-              f"{len(pipeline)} cliente(s) com valor e sem ajuizamento.")
+    ui.cartao(
+        colunas[2], "Parado fora do protocolo", formatar_moeda(valor_pipeline),
+        f"{len(pipeline)} cliente(s) no cenário selecionado, de "
+        f"{len(disponivel)} com valor e sem ajuizamento.",
+    )
     ui.cartao(
         colunas[3],
         "Necessário por mês",
@@ -209,6 +230,26 @@ def _simulador(pipeline: pd.DataFrame, falta: float) -> None:
 
     if pipeline.empty:
         st.info("Nenhum cliente com valor previsto aguardando protocolo.")
+        return
+
+    filtros = st.columns([1.2, 2])
+    with filtros[0]:
+        status = st.multiselect(
+            "Filtrar por status",
+            sorted(pipeline["status"].dropna().unique()),
+            default=[],
+            key="sim_status",
+        )
+    with filtros[1]:
+        busca = st.text_input(
+            "Filtrar por cliente", placeholder="parte do nome", key="sim_busca"
+        )
+
+    pipeline = ui.aplicar_multiselecao(pipeline, "status", status)
+    pipeline = ui.busca_texto(pipeline, ["cliente"], busca)
+
+    if pipeline.empty:
+        st.info("Nenhum cliente no filtro atual.")
         return
 
     ordenado = pipeline.sort_values("honorario_total", ascending=False).copy()
@@ -349,15 +390,21 @@ def painel(clientes: pd.DataFrame) -> None:
         por_responsavel["media"] = por_responsavel["honorario_total"] / (
             por_responsavel["ajuizamentos"].replace(0, pd.NA)
         )
+        colunas_valor = ui.remover_colunas_vazias(
+            por_responsavel, ["honorario_total", "media"]
+        )
+        rotulos = {
+            "responsavel": "Responsável",
+            "clientes": "Clientes",
+            "ajuizamentos": "Ajuizados",
+        }
+        rotulos.update(
+            {c: {"honorario_total": "Previsto", "media": "Média"}[c]
+             for c in colunas_valor}
+        )
         ui.tabela(
-            ui.formatar_moedas(por_responsavel, ["honorario_total", "media"]),
-            {
-                "responsavel": "Responsável",
-                "clientes": "Clientes",
-                "ajuizamentos": "Ajuizados",
-                "honorario_total": "Previsto",
-                "media": "Média",
-            },
+            ui.formatar_moedas(por_responsavel, colunas_valor),
+            rotulos,
             "Sem dados no filtro.",
         )
 

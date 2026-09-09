@@ -64,41 +64,103 @@ PALETA = {
 
 def aplicar_identidade_visual() -> None:
     """
-    Aplica a identidade do escritorio por CSS.
+    Identidade visual do escritório, aplicada por CSS.
 
-    O tema normalmente iria em .streamlit/config.toml, mas na versao de
-    arquivo unico nao existe essa pasta. Injetar o estilo aqui mantem o
-    visual sem depender de arquivo extra no repositorio.
+    O tema normalmente iria em .streamlit/config.toml, mas a versão de
+    arquivo único não tem essa pasta. Injetar aqui mantém o visual sem
+    depender de arquivo extra no repositório.
+
+    A referência é o papel timbrado: fundo branco, faixa azul-marinho
+    no topo, filete amarelo e tipografia sóbria. Nada de tema escuro.
     """
     st.markdown(
         f"""
         <style>
-        html, body, [class*="css"], .stMarkdown, .stText {{
+        html, body, [class*="css"], .stMarkdown, .stText,
+        button, input, select, textarea {{
             font-family: Arial, Helvetica, sans-serif;
         }}
         .stApp {{ background-color: #FFFFFF; }}
+        section[data-testid="stSidebar"] {{ display: none; }}
+        .block-container {{ padding-top: 1.2rem; max-width: 1500px; }}
+
         h1, h2, h3, h4 {{
             color: {PALETA["AZUL_ESCURO"]};
-            font-family: Arial, Helvetica, sans-serif;
             font-weight: 700;
+            letter-spacing: -0.01em;
         }}
-        section[data-testid="stSidebar"] {{ display: none; }}
-        div[data-testid="stAppViewContainer"] > .main {{ padding-top: 1rem; }}
+        h3 {{ font-size: 1.25rem; margin-top: 1.4rem; }}
+        h4 {{
+            font-size: 1rem;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            color: {PALETA["CINZA_TEXTO"]};
+            border-bottom: 1px solid #E3E9F0;
+            padding-bottom: 6px;
+            margin-top: 1.6rem;
+        }}
 
+        /* Faixa institucional, no espírito do papel timbrado */
+        .timbre {{
+            background: {PALETA["AZUL_ESCURO"]};
+            border-radius: 4px;
+            padding: 16px 22px 14px 22px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            border-bottom: 4px solid {PALETA["AMARELO"]};
+            margin-bottom: 18px;
+        }}
+        .timbre .marca {{
+            display: flex;
+            align-items: center;
+            gap: 14px;
+        }}
+        .timbre .monograma {{
+            border: 2px solid #FFFFFF;
+            border-radius: 6px;
+            color: #FFFFFF;
+            font-weight: 700;
+            font-size: 1.05rem;
+            letter-spacing: 0.02em;
+            padding: 4px 9px;
+        }}
+        .timbre .nome {{
+            color: #FFFFFF;
+            font-size: 1.35rem;
+            font-weight: 700;
+            line-height: 1.1;
+        }}
+        .timbre .nome span {{
+            display: block;
+            font-size: 0.7rem;
+            font-weight: 400;
+            letter-spacing: 0.18em;
+            text-transform: uppercase;
+            color: #C9D6E6;
+            margin-top: 3px;
+        }}
+        .timbre .contexto {{
+            color: #FFFFFF;
+            font-size: 0.82rem;
+            text-align: right;
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+        }}
+
+        /* Indicadores */
         div[data-testid="stMetric"] {{
-            background-color: {PALETA["CINZA_FUNDO"]};
-            border-left: 5px solid {PALETA["AZUL_CLARO"]};
+            background-color: #FFFFFF;
+            border: 1px solid #E3E9F0;
+            border-left: 4px solid {PALETA["AZUL_CLARO"]};
             border-radius: 6px;
             padding: 12px 14px;
             overflow: visible;
         }}
-        /* O Streamlit corta o valor com reticencias quando a coluna e
-           estreita. Aqui o valor pode quebrar linha e diminuir um pouco,
-           de modo que numeros longos apareçam inteiros. */
         div[data-testid="stMetricValue"] {{
             color: {PALETA["AZUL_ESCURO"]};
             font-weight: 700;
-            font-size: 1.55rem;
+            font-size: 1.5rem;
             white-space: normal !important;
             overflow: visible !important;
             text-overflow: clip !important;
@@ -113,38 +175,33 @@ def aplicar_identidade_visual() -> None:
         div[data-testid="stMetricLabel"] {{
             color: {PALETA["CINZA_TEXTO"]};
             text-transform: uppercase;
-            font-size: 0.75rem;
-            letter-spacing: 0.04em;
+            font-size: 0.72rem;
+            letter-spacing: 0.05em;
         }}
+
+        /* Navegação e botões */
+        div[data-testid="stSegmentedControl"] button {{ font-weight: 600; }}
         .stButton button {{
             border-radius: 6px;
             font-weight: 600;
-        }}
-        .marca-db {{
-            border-bottom: 3px solid {PALETA["AMARELO"]};
-            padding-bottom: 10px;
-            margin-bottom: 18px;
-        }}
-        .marca-db .titulo {{
+            border: 1px solid {PALETA["AZUL_ESCURO"]};
             color: {PALETA["AZUL_ESCURO"]};
-            font-size: 1.9rem;
-            font-weight: 700;
-            letter-spacing: -0.01em;
+            background: #FFFFFF;
         }}
-        .marca-db .subtitulo {{
-            color: {PALETA["CINZA_TEXTO"]};
-            font-size: 0.85rem;
-            text-transform: uppercase;
-            letter-spacing: 0.12em;
+        .stButton button:hover {{
+            background: {PALETA["AZUL_ESCURO"]};
+            color: #FFFFFF;
         }}
-        /* Navegacao horizontal no topo */
-        div[data-testid="stSegmentedControl"] button {{
-            font-weight: 600;
-        }}
+
         .barra-status {{
             color: {PALETA["CINZA_TEXTO"]};
             font-size: 0.78rem;
-            padding-top: 6px;
+            padding: 4px 0 2px 0;
+            border-top: 1px solid #EEF2F7;
+        }}
+        div[data-testid="stExpander"] {{
+            border: 1px solid #E3E9F0;
+            border-radius: 6px;
         }}
         </style>
         """,
@@ -155,9 +212,12 @@ def aplicar_identidade_visual() -> None:
 def cabecalho(subtitulo: str) -> None:
     st.markdown(
         f"""
-        <div class="marca-db">
-          <div class="titulo">Dutra Bitencourt</div>
-          <div class="subtitulo">{subtitulo}</div>
+        <div class="timbre">
+          <div class="marca">
+            <div class="monograma">DB</div>
+            <div class="nome">Dutra Bitencourt<span>Advocacia</span></div>
+          </div>
+          <div class="contexto">{subtitulo}</div>
         </div>
         """,
         unsafe_allow_html=True,

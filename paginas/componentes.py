@@ -2,8 +2,15 @@
 
 from __future__ import annotations
 
+from datetime import date
+
 import pandas as pd
 import streamlit as st
+
+# Recorte padrão dos filtros de data. Foi quando o cadastro passou a
+# ser confiável. Os registros anteriores continuam na base e podem ser
+# alcançados ampliando o filtro; só não entram por padrão.
+INICIO_PADRAO = date(2026, 1, 1)
 
 MESES = (
     "JANEIRO",
@@ -65,13 +72,16 @@ def filtro_periodo(
     if validas.empty:
         return dados
 
-    inicio_padrao = validas.min().date()
+    minimo = validas.min().date()
     fim_padrao = validas.max().date()
+    inicio_padrao = (
+        INICIO_PADRAO if minimo <= INICIO_PADRAO <= fim_padrao else minimo
+    )
 
     intervalo = st.date_input(
         rotulo,
         value=(inicio_padrao, fim_padrao),
-        min_value=inicio_padrao,
+        min_value=minimo,
         max_value=fim_padrao,
         format="DD/MM/YYYY",
         key=chave,
@@ -210,3 +220,20 @@ def matriz_compacta(
                 )
 
     return matriz
+
+
+def remover_colunas_vazias(dados: pd.DataFrame, colunas: list[str]) -> list[str]:
+    """
+    Devolve só as colunas que têm algum valor diferente de zero.
+
+    Coluna inteiramente zerada não informa nada e empurra o resto da
+    tabela para fora da tela.
+    """
+    uteis = []
+    for coluna in colunas:
+        if coluna not in dados.columns:
+            continue
+        serie = pd.to_numeric(dados[coluna], errors="coerce").fillna(0)
+        if (serie != 0).any():
+            uteis.append(coluna)
+    return uteis

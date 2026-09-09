@@ -38,9 +38,37 @@ def render(prazos: pd.DataFrame, logs: pd.DataFrame) -> None:
 def painel(prazos: pd.DataFrame, logs: pd.DataFrame) -> None:
     regras = auth.regras_atuais()
 
+    st.caption(
+        "Carga é a quantidade de prazos em aberto atribuídos a cada responsável "
+        "técnico, ou seja, registros do CONTROLE DE PRAZOS cujo status não é "
+        "Protocolado nem Concluído. A distribuição por cor usa a data de "
+        "controle, que é o Prazo Fatal e, na falta dele, a Data Final. "
+        "Já os eventos vêm do log e medem o que cada pessoa executou no período."
+    )
+
     if not prazos.empty:
-        st.markdown("#### Carga atual por responsável")
         abertos = prazos[~prazos["encerrado"]]
+
+        colunas = st.columns(4)
+        ui.cartao(colunas[0], "Prazos em aberto", len(abertos))
+        ui.cartao(
+            colunas[1], "Responsáveis com carga",
+            int(abertos[abertos["responsavel"] != "SEM RESPONSÁVEL"]["responsavel"].nunique()),
+        )
+        vencidos = abertos[abertos["situacao"] == "VENCIDO"]
+        ui.cartao(
+            colunas[2], "Vencidos sob responsabilidade",
+            int((vencidos["responsavel"] != "SEM RESPONSÁVEL").sum()),
+            "Prazo de controle já ultrapassado e status ainda em aberto.",
+        )
+        ui.cartao(
+            colunas[3], "Em aberto sem responsável",
+            int((abertos["responsavel"] == "SEM RESPONSÁVEL").sum()),
+            "Não entram na carga de ninguém. São pendência de atribuição.",
+        )
+
+        st.markdown("#### Carga atual por responsável")
+        st.caption("Prazos em aberto, por situação da data de controle.")
         resumo = (
             abertos.groupby(["responsavel", "situacao"])
             .size()
@@ -72,7 +100,12 @@ def painel(prazos: pd.DataFrame, logs: pd.DataFrame) -> None:
         )
         return
 
-    st.markdown("#### Eventos registrados no período")
+    st.markdown("#### Eventos executados no período")
+    st.caption(
+        "Contagem de eventos do log por quem executou. Lançamento de prazo, "
+        "protocolo, envio para revisão, revisão concluída, conferência no "
+        "Bitrix e cadastro de cliente. Alteração de outros campos não entra."
+    )
     periodo = ui.filtro_periodo(logs, "data_hora", "Período", "prod_periodo")
     eventos = periodo[periodo["tipo_evento"].isin(EVENTOS_RELEVANTES)]
 
@@ -109,6 +142,7 @@ def painel(prazos: pd.DataFrame, logs: pd.DataFrame) -> None:
     )
     st.plotly_chart(figura, width="stretch")
 
+    st.markdown("#### Resumo por editor e tipo de evento")
     tabela_resumo = (
         identificados.pivot_table(
             index="editor",

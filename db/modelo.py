@@ -672,6 +672,10 @@ def ciclos_do_cliente(
     if clientes.empty:
         return pd.DataFrame()
 
+    # O log agrupa por ID permanente, mas o cadastro de clientes não
+    # tem esse ID. Por isso os marcos são indexados pelas duas chaves:
+    # o ID e o nome normalizado. Sem isso nenhum marco casava e as
+    # médias de ciclo apareciam vazias.
     marcos: dict[str, dict] = {}
     if not transicoes.empty:
         for chave, grupo in transicoes.groupby("chave_registro"):
@@ -681,18 +685,22 @@ def ciclos_do_cliente(
             pronta = grupo[
                 grupo["para"].str.contains("PROTOCOLAR|REVIS", na=False, regex=True)
             ]
-            marcos[chave] = {
+            marco = {
                 "minuta": minuta["data_hora"].min() if not minuta.empty else pd.NaT,
                 "pronta": pronta["data_hora"].min() if not pronta.empty else pd.NaT,
                 "protocolo": (
                     protocolo["data_hora"].min() if not protocolo.empty else pd.NaT
                 ),
             }
+            marcos[str(chave)] = marco
+            for nome in grupo["cliente_autor"].dropna().unique():
+                indice = normalizar_texto(nome)
+                if indice and indice not in marcos:
+                    marcos[indice] = marco
 
     linhas = []
     for _, cliente in clientes.iterrows():
-        chave = normalizar_texto(cliente["cliente"])
-        marco = marcos.get(chave, {})
+        marco = marcos.get(normalizar_texto(cliente["cliente"]), {})
         contrato = cliente["data_contrato"]
         protocolo = (
             cliente["data_ajuizamento"]

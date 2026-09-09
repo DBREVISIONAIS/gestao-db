@@ -79,7 +79,53 @@ def painel(resultados: pd.DataFrame) -> None:
     ui.cartao(cartoes[2], "AJG deferida", int((ajg["resultado"] == "DEFERIDA").sum()))
     ui.cartao(cartoes[3], "AJG indeferida", int((ajg["resultado"] == "INDEFERIDA").sum()))
 
+    # Taxa de êxito: procedente e parcialmente procedente sobre o total
+    # de sentenças classificadas. Extinção fica fora do denominador
+    # porque não é julgamento de mérito.
+    julgadas = sentencas[
+        sentencas["resultado"].isin(
+            ["PROCEDENTE", "PARCIALMENTE PROCEDENTE", "IMPROCEDENTE"]
+        )
+    ]
+    favoraveis = julgadas[julgadas["resultado"] != "IMPROCEDENTE"]
+    taxa = (len(favoraveis) / len(julgadas) * 100) if len(julgadas) else 0
+
+    colunas = st.columns(4)
+    ui.cartao(
+        colunas[0], "Taxa de êxito",
+        f"{taxa:.1f}%".replace(".", ",") if len(julgadas) else "—",
+        "Procedentes e parciais sobre o total de sentenças de mérito. "
+        "Extinções ficam fora do cálculo.",
+    )
+    ui.cartao(colunas[1], "Sentenças de mérito", len(julgadas))
+    embargos = filtrados[filtrados["categoria"] == "EMBARGOS"]
+    ui.cartao(
+        colunas[2], "Embargos acolhidos",
+        int(embargos["resultado"].str.contains("ACOLHIDOS", na=False).sum()
+            - embargos["resultado"].str.contains("NÃO ACOLHIDOS", na=False).sum()),
+    )
+    agravos = filtrados[filtrados["categoria"] == "AGRAVO"]
+    ui.cartao(colunas[3], "Agravos providos",
+              int((agravos["resultado"] == "PROVIDO").sum()))
+
     ui.resumo_filtro(len(resultados), len(filtrados))
+
+    with st.expander("Motivos registrados nos resultados"):
+        st.caption(
+            "Extraídos do texto do conteúdo e da observação: prescrição, "
+            "decadência, laudo desfavorável, prova insuficiente, ilegitimidade "
+            "e afins. Sem registro no controle não há motivo a apurar."
+        )
+        motivos_serie = (
+            filtrados[filtrados["motivo"] != "NÃO REGISTRADO NO CONTROLE"]
+            .groupby("motivo").size().reset_index(name="Quantidade")
+            .sort_values("Quantidade", ascending=False)
+            .rename(columns={"motivo": "Motivo"})
+        )
+        if motivos_serie.empty:
+            st.info("Nenhum motivo registrado no recorte.")
+        else:
+            st.dataframe(motivos_serie, width="stretch", hide_index=True)
 
     esquerda, direita = st.columns(2)
 
