@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
+import numpy as np
 import pandas as pd
 import streamlit as st
 
@@ -141,6 +142,21 @@ def carregar_prazos() -> pd.DataFrame:
         # registros ficariam fora da contagem operacional.
         fatal = converter_data(prazo_fatal)
         final = converter_data(data_final)
+
+        # O campo FATAL nem sempre traz data. Ele também recebe texto,
+        # e AGUARDA é uma situação declarada de propósito, diferente de
+        # campo em branco. Separar as duas coisas importa: AGUARDA é
+        # decisão registrada, campo vazio é pendência de preenchimento.
+        texto_fatal = normalizar_texto(prazo_fatal)
+        if pd.notna(fatal):
+            situacao_fatal = "COM FATAL"
+        elif "AGUARDA" in texto_fatal:
+            situacao_fatal = "AGUARDA"
+        elif not texto_fatal:
+            situacao_fatal = "FATAL VAZIO"
+        else:
+            situacao_fatal = "FATAL INVÁLIDO"
+
         if pd.notna(fatal):
             data_controle, fonte_data = fatal, "PRAZO FATAL"
         elif pd.notna(final):
@@ -174,6 +190,8 @@ def carregar_prazos() -> pd.DataFrame:
                 ),
                 "status_padronizado": padronizar_status(status),
                 "tipo_prazo": classificar_tipo_prazo(conteudo),
+                "fatal_texto": str(prazo_fatal).strip(),
+                "situacao_fatal": situacao_fatal,
                 "data_controle": data_controle,
                 "fonte_data": fonte_data,
                 "situacao": situacao,
@@ -400,6 +418,47 @@ COLUNAS_LOG = {
     "OBSERVACAO": "observacao",
 }
 
+# Colunas acrescentadas pela V11 do Apps Script. Podem nao existir em
+# instalacoes antigas, entao a ausencia nao e erro.
+COLUNAS_LOG_OPCIONAIS = {
+    "ID_CLIENTE": "id_cliente",
+    "ID_PRAZO": "id_prazo",
+    "VINCULO": "vinculo",
+}
+
+
+EMAIL_INDISPONIVEL = "E-MAIL NÃO DISPONIBILIZADO PELO GOOGLE"
+
+
+def _nome_do_editor(email: str, chave: str) -> str:
+    """
+    Nome de exibição do editor.
+
+    Prioriza o e-mail, porque CHAVE_EDITOR vem de
+    Session.getTemporaryActiveUserKey(), que é anônima e rotaciona: a
+    mesma pessoa vira várias chaves ao longo do tempo, o que inutiliza
+    qualquer contagem por editor.
+
+    O bloco [editores] dos Secrets permite mapear e-mail para nome
+    próprio. Sem ele, usa a parte antes do @, que já costuma bastar.
+    """
+    email = str(email or "").strip()
+
+    if email and "@" in email and email != EMAIL_INDISPONIVEL:
+        try:
+            mapa = dict(st.secrets.get("editores", {}))
+        except Exception:  # noqa: BLE001
+            mapa = {}
+
+        for chave_secreta, nome in mapa.items():
+            if chave_secreta.strip().lower() == email.lower():
+                return str(nome)
+
+        local = email.split("@")[0]
+        return local.replace(".", " ").replace("_", " ").title()
+
+    return "NÃO IDENTIFICADO"
+
 
 @st.cache_data(ttl=conexao.TTL_CACHE, show_spinner="Lendo o histórico de alterações...")
 def carregar_logs() -> pd.DataFrame:
@@ -423,6 +482,10 @@ def carregar_logs() -> pd.DataFrame:
         registro = {}
         for cabecalho, campo in COLUNAS_LOG.items():
             registro[campo] = valor_por_cabecalho(linha, mapa, [cabecalho])
+        for cabecalho, campo in COLUNAS_LOG_OPCIONAIS.items():
+            registro[campo] = valor_por_cabecalho(
+                linha, mapa, [cabecalho, cabecalho.replace("_", " ")]
+            )
         if not valor_preenchido(registro.get("data_hora")) and not valor_preenchido(
             registro.get("aba_origem")
         ):
@@ -436,6 +499,21 @@ def carregar_logs() -> pd.DataFrame:
     dados["data_hora"] = dados["data_hora"].apply(converter_data)
     dados["linha"] = pd.to_numeric(dados["linha"], errors="coerce")
     dados = dados.sort_values("data_hora", ascending=False, na_position="last")
+    # Identidade do editor: e-mail sempre que existir. A chave anônima
+    # fica guardada só para conferência pontual de uma linha.
+    dados["editor"] = [
+        _nome_do_editor(email, chave)
+        for email, chave in zip(dados["editor_email"], dados["chave_editor"])
+    ]
+    # Chave de agrupamento do histórico: o ID permanente quando existe,
+    # senão o nome. O ID é mais seguro porque sobrevive a mudança de
+    # nome e a reordenação de linhas.
+    dados["chave_registro"] = [
+        str(ident).strip() if str(ident).strip() else normalizar_texto(nome)
+        for ident, nome in zip(dados["id_cliente"], dados["cliente_autor"])
+    ]
+    dados["hora"] = dados["data_hora"].dt.strftime("%H") + "h"
+    dados["dia_semana"] = dados["data_hora"].dt.dayofweek
     dados["chave_origem"] = (
         dados["aba_origem"].astype(str).str.strip()
         + "|"
@@ -496,3 +574,155 @@ def minutos_desde_atualizacao(estado: dict) -> float | None:
     if pd.isna(momento):
         return None
     return (datetime.now() - momento).total_seconds() / 60.0
+
+
+# ------------------------------------------------- análise do histórico
+
+DIAS_SEMANA = (
+    "Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado", "Domingo",
+)
+
+
+def _dias_uteis(inicio, fim) -> float | None:
+    """Dias úteis entre duas datas, sem considerar feriados."""
+    if pd.isna(inicio) or pd.isna(fim):
+        return None
+    return float(
+        np.busday_count(
+            pd.Timestamp(inicio).date(), pd.Timestamp(fim).date()
+        )
+    )
+
+
+def transicoes_status(logs: pd.DataFrame) -> pd.DataFrame:
+    """
+    Extrai as mudanças efetivas de status a partir do log.
+
+    Considera apenas linhas cujo cabeçalho editado é STATUS e em que o
+    valor mudou de fato. Alteração de outros campos não é transição.
+    """
+    if logs.empty:
+        return pd.DataFrame()
+
+    base = logs[
+        logs["cabecalho"].astype(str).str.upper().str.strip().eq("STATUS")
+    ].copy()
+    if base.empty:
+        return base
+
+    base["de"] = (
+        base["valor_anterior"].astype(str).str.strip().str.upper().replace("", "SEM STATUS")
+    )
+    base["para"] = base["valor_novo"].astype(str).str.strip().str.upper()
+    base = base[(base["para"] != "") & (base["de"] != base["para"])]
+    return base.sort_values("data_hora")
+
+
+def permanencia_por_etapa(transicoes: pd.DataFrame) -> pd.DataFrame:
+    """
+    Tempo de permanência em cada etapa, por registro.
+
+    A entrada na etapa é a transição que leva a ela; a saída é a
+    transição seguinte do mesmo registro. Ciclos sem saída são os
+    casos que ainda estão na etapa e ficam de fora da média de ciclos
+    completos, exatamente como no DASH LOGS.
+    """
+    if transicoes.empty:
+        return pd.DataFrame()
+
+    linhas = []
+    for chave, grupo in transicoes.groupby("chave_registro"):
+        grupo = grupo.sort_values("data_hora")
+        registros = grupo.to_dict("records")
+        for indice, atual in enumerate(registros):
+            seguinte = registros[indice + 1] if indice + 1 < len(registros) else None
+            entrada = atual["data_hora"]
+            saida = seguinte["data_hora"] if seguinte else pd.NaT
+            corridos = (
+                (saida - entrada).total_seconds() / 86400 if pd.notna(saida) else None
+            )
+            linhas.append(
+                {
+                    "chave_registro": chave,
+                    "cliente": atual["cliente_autor"],
+                    "etapa": atual["para"],
+                    "entrada": entrada,
+                    "saida": saida,
+                    "dias_corridos": round(corridos, 1) if corridos is not None else None,
+                    "dias_uteis": _dias_uteis(entrada, saida),
+                    "editor_entrada": atual["editor"],
+                    "concluido": seguinte is not None,
+                }
+            )
+
+    return pd.DataFrame(linhas)
+
+
+def ciclos_do_cliente(
+    clientes: pd.DataFrame, transicoes: pd.DataFrame
+) -> pd.DataFrame:
+    """
+    Tempo entre contrato, minuta e protocolo, por cliente.
+
+    O marco de minuta é a primeira transição para MINUTA. O de
+    protocolo é a Data do Ajuizamento quando existir e, na falta dela,
+    a primeira transição para PROTOCOLADO. Casos sem marco entram como
+    pendência de informação, e não como atraso.
+    """
+    if clientes.empty:
+        return pd.DataFrame()
+
+    marcos: dict[str, dict] = {}
+    if not transicoes.empty:
+        for chave, grupo in transicoes.groupby("chave_registro"):
+            grupo = grupo.sort_values("data_hora")
+            minuta = grupo[grupo["para"].str.contains("MINUTA", na=False)]
+            protocolo = grupo[grupo["para"].str.contains("PROTOCOLADO", na=False)]
+            pronta = grupo[
+                grupo["para"].str.contains("PROTOCOLAR|REVIS", na=False, regex=True)
+            ]
+            marcos[chave] = {
+                "minuta": minuta["data_hora"].min() if not minuta.empty else pd.NaT,
+                "pronta": pronta["data_hora"].min() if not pronta.empty else pd.NaT,
+                "protocolo": (
+                    protocolo["data_hora"].min() if not protocolo.empty else pd.NaT
+                ),
+            }
+
+    linhas = []
+    for _, cliente in clientes.iterrows():
+        chave = normalizar_texto(cliente["cliente"])
+        marco = marcos.get(chave, {})
+        contrato = cliente["data_contrato"]
+        protocolo = (
+            cliente["data_ajuizamento"]
+            if pd.notna(cliente["data_ajuizamento"])
+            else marco.get("protocolo", pd.NaT)
+        )
+        minuta = marco.get("minuta", pd.NaT)
+        pronta = marco.get("pronta", pd.NaT)
+
+        def corridos(inicio, fim):
+            if pd.isna(inicio) or pd.isna(fim):
+                return None
+            return round((pd.Timestamp(fim) - pd.Timestamp(inicio)).days, 1)
+
+        linhas.append(
+            {
+                "cliente": cliente["cliente"],
+                "servico": cliente["servico"],
+                "responsavel": cliente["responsavel"],
+                "status": cliente["status"],
+                "contrato": contrato,
+                "minuta": minuta,
+                "pronta": pronta,
+                "protocolo": protocolo,
+                "contrato_minuta": corridos(contrato, minuta),
+                "contrato_protocolo": corridos(contrato, protocolo),
+                "pronta_protocolo": corridos(pronta, protocolo),
+                "contrato_minuta_uteis": _dias_uteis(contrato, minuta),
+                "contrato_protocolo_uteis": _dias_uteis(contrato, protocolo),
+            }
+        )
+
+    return pd.DataFrame(linhas)

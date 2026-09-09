@@ -22,7 +22,7 @@ COLUNAS_HISTORICO = {
     "valor_anterior": "De",
     "valor_novo": "Para",
     "tipo_evento": "Evento",
-    "chave_editor": "Editor",
+    "editor": "Editor",
 }
 
 
@@ -64,7 +64,7 @@ def painel(logs: pd.DataFrame, base_ids: pd.DataFrame) -> None:
             )
         with colunas[3]:
             editores = ui.multiselecao(
-                "Editor", ui.opcoes(dados, "chave_editor"), "hist_editor"
+                "Editor", ui.opcoes(dados, "editor"), "hist_editor"
             )
         dados = ui.filtro_periodo(dados, "data_hora", "Período", "hist_periodo")
 
@@ -74,7 +74,7 @@ def painel(logs: pd.DataFrame, base_ids: pd.DataFrame) -> None:
         ]
     dados = ui.aplicar_multiselecao(dados, "aba_origem", abas)
     dados = ui.aplicar_multiselecao(dados, "tipo_evento", eventos)
-    dados = ui.aplicar_multiselecao(dados, "chave_editor", editores)
+    dados = ui.aplicar_multiselecao(dados, "editor", editores)
 
     st.caption(f"{len(dados)} registro(s) no filtro atual.")
 
@@ -82,11 +82,6 @@ def painel(logs: pd.DataFrame, base_ids: pd.DataFrame) -> None:
     visao["data_hora"] = pd.to_datetime(visao["data_hora"], errors="coerce").dt.strftime(
         "%d/%m/%Y %H:%M:%S"
     )
-    if not regras["ver_editor"]:
-        visao["chave_editor"] = (
-            visao["chave_editor"].astype(str).str.split("@").str[0]
-        )
-
     ui.tabela(visao.head(1000), COLUNAS_HISTORICO, "Nenhum registro no filtro.")
 
     if len(dados) > 1000:

@@ -80,16 +80,25 @@ def painel(prazos: pd.DataFrame, logs: pd.DataFrame) -> None:
         st.info("Nenhum evento relevante no período selecionado.")
         return
 
+    identificados = eventos[eventos["editor"] != "NÃO IDENTIFICADO"]
+    nao_identificados = len(eventos) - len(identificados)
+    if nao_identificados:
+        st.caption(
+            f"{nao_identificados} evento(s) sem e-mail registrado pelo Google "
+            "ficaram fora do gráfico por não permitirem identificar o autor."
+        )
+    if identificados.empty:
+        st.info("Nenhum evento com editor identificado no período.")
+        return
+
     contagem = (
-        eventos.groupby(["chave_editor", "tipo_evento"]).size().reset_index(name="Qtd")
+        identificados.groupby(["editor", "tipo_evento"]).size().reset_index(name="Qtd")
     )
-    if not regras["ver_editor"]:
-        contagem["chave_editor"] = contagem["chave_editor"].astype(str).str.split("@").str[0]
 
     figura = px.bar(
         contagem,
         x="Qtd",
-        y="chave_editor",
+        y="editor",
         color="tipo_evento",
         orientation="h",
     )
@@ -101,14 +110,14 @@ def painel(prazos: pd.DataFrame, logs: pd.DataFrame) -> None:
     st.plotly_chart(figura, width="stretch")
 
     tabela_resumo = (
-        eventos.pivot_table(
-            index="chave_editor",
+        identificados.pivot_table(
+            index="editor",
             columns="tipo_evento",
             values="id",
             aggfunc="count",
             fill_value=0,
         )
         .reset_index()
-        .rename(columns={"chave_editor": "Editor"})
+        .rename(columns={"editor": "Editor"})
     )
     st.dataframe(tabela_resumo, width="stretch", hide_index=True)

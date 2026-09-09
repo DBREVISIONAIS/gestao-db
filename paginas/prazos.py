@@ -24,6 +24,15 @@ ATALHOS = {
     "Críticos": ["VENCIDO", "VENCE HOJE", "PRÓXIMOS 7 DIAS"],
 }
 
+# Como o registro é controlado. COM FATAL é data válida no campo Fatal.
+# AGUARDA é situação escrita no próprio campo, e não ausência de dado.
+ATALHOS_FATAL = {
+    "Todos": [],
+    "Com prazo fatal": ["COM FATAL"],
+    "Em aguarda": ["AGUARDA"],
+    "Fatal vazio": ["FATAL VAZIO", "FATAL INVÁLIDO"],
+}
+
 COLUNAS_BUSCA = ["autor", "conteudo", "observacao", "responsavel", "delegado", "status"]
 
 COLUNAS_TABELA = {
@@ -58,13 +67,23 @@ def render(prazos: pd.DataFrame) -> None:
 
 @st.fragment
 def painel(prazos: pd.DataFrame) -> None:
-    atalho = st.segmented_control(
-        "Atalhos",
-        list(ATALHOS),
-        default="Todos",
-        key="pz_atalho",
-        label_visibility="collapsed",
-    )
+    linha_atalhos = st.columns(2)
+    with linha_atalhos[0]:
+        atalho = st.segmented_control(
+            "Atalhos por vencimento",
+            list(ATALHOS),
+            default="Todos",
+            key="pz_atalho",
+            label_visibility="collapsed",
+        )
+    with linha_atalhos[1]:
+        atalho_fatal = st.segmented_control(
+            "Atalhos por controle",
+            list(ATALHOS_FATAL),
+            default="Todos",
+            key="pz_atalho_fatal",
+            label_visibility="collapsed",
+        )
 
     busca = st.text_input(
         "Buscar",
@@ -90,16 +109,31 @@ def painel(prazos: pd.DataFrame) -> None:
                 "Tipo de prazo", ui.opcoes(prazos, "tipo_prazo"), "pz_tipo"
             )
 
-        linha2 = st.columns([1, 2])
+        linha2 = st.columns(3)
         with linha2[0]:
-            somente_abertos = st.checkbox("Somente em aberto", value=True, key="pz_ab")
+            situacoes_fatal = ui.multiselecao(
+                "Situação do fatal", ui.opcoes(prazos, "situacao_fatal"), "pz_sitfatal"
+            )
         with linha2[1]:
+            fontes = ui.multiselecao(
+                "Fonte da data de controle", ui.opcoes(prazos, "fonte_data"), "pz_fonte"
+            )
+        with linha2[2]:
+            somente_abertos = st.checkbox("Somente em aberto", value=True, key="pz_ab")
+
+        linha3 = st.columns(1)
+        with linha3[0]:
             filtrados = ui.filtro_periodo(
                 prazos, "data_controle", "Data de controle entre", "pz_periodo"
             )
 
     situacoes = ATALHOS.get(atalho or "Todos", [])
     filtrados = ui.aplicar_multiselecao(filtrados, "situacao", situacoes)
+    filtrados = ui.aplicar_multiselecao(
+        filtrados, "situacao_fatal", ATALHOS_FATAL.get(atalho_fatal or "Todos", [])
+    )
+    filtrados = ui.aplicar_multiselecao(filtrados, "situacao_fatal", situacoes_fatal)
+    filtrados = ui.aplicar_multiselecao(filtrados, "fonte_data", fontes)
     filtrados = ui.aplicar_multiselecao(filtrados, "responsavel", responsaveis)
     filtrados = ui.aplicar_multiselecao(filtrados, "delegado", delegados)
     filtrados = ui.aplicar_multiselecao(filtrados, "status", status)
@@ -154,7 +188,30 @@ def painel(prazos: pd.DataFrame) -> None:
         "Pendência de atribuição.",
     )
 
-    # Terceira faixa: indicadores de tempo, iguais aos do DASH PRAZOS.
+    # Terceira faixa: como o registro é controlado.
+    colunas = st.columns(4)
+    ui.cartao(
+        colunas[0], "Com prazo fatal",
+        int((abertos["situacao_fatal"] == "COM FATAL").sum()),
+        "Data válida no campo Fatal.",
+    )
+    ui.cartao(
+        colunas[1], "Em aguarda",
+        int((abertos["situacao_fatal"] == "AGUARDA").sum()),
+        "AGUARDA escrito no campo Fatal. É situação declarada, não falta de dado.",
+    )
+    ui.cartao(
+        colunas[2], "Fatal vazio ou inválido",
+        int(abertos["situacao_fatal"].isin(["FATAL VAZIO", "FATAL INVÁLIDO"]).sum()),
+        "Pendência de preenchimento.",
+    )
+    ui.cartao(
+        colunas[3], "Controlados pela data final",
+        int((abertos["fonte_data"] == "DATA FINAL").sum()),
+        "Sem fatal válido, mas com Data Final para acompanhamento.",
+    )
+
+    # Quarta faixa: indicadores de tempo, iguais aos do DASH PRAZOS.
     dias = filtrados["dias_evento_fatal"].dropna()
     colunas = st.columns(4)
     ui.cartao(
@@ -169,6 +226,40 @@ def painel(prazos: pd.DataFrame) -> None:
         int((filtrados["fonte_data"] == "SEM DATA").sum()),
         "Sem Prazo Fatal válido e sem Data Final.",
     )
+
+    esquerda, direita = st.columns(2)
+    with esquerda:
+        st.markdown("#### Composição do controle")
+        composicao = (
+            filtrados.groupby(["situacao_fatal", "fonte_data"])
+            .size()
+            .reset_index(name="Quantidade")
+            .sort_values("Quantidade", ascending=False)
+        )
+        ui.tabela(
+            composicao,
+            {
+                "situacao_fatal": "Situação do fatal",
+                "fonte_data": "Fonte da data",
+                "Quantidade": "Quantidade",
+            },
+            "Sem registros no filtro.",
+        )
+    with direita:
+        st.markdown("#### Aguarda por responsável")
+        aguarda = filtrados[filtrados["situacao_fatal"] == "AGUARDA"]
+        if aguarda.empty:
+            st.info("Nenhum registro em aguarda no filtro.")
+        else:
+            serie = (
+                aguarda.groupby("responsavel").size().reset_index(name="Quantidade")
+                .sort_values("Quantidade", ascending=False)
+            )
+            figura = px.bar(serie, x="Quantidade", y="responsavel", orientation="h")
+            figura.update_layout(
+                height=320, yaxis={"categoryorder": "total ascending", "title": ""}
+            )
+            st.plotly_chart(figura, width="stretch")
 
     esquerda, direita = st.columns(2)
     with esquerda:
