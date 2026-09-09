@@ -20,9 +20,16 @@ filtro nao reexecuta o app inteiro nem refaz leitura de planilha.
 
 from __future__ import annotations
 
+import os
+import sys
+
 import streamlit as st
 
-from db import auth, conexao, modelo
+# Garante que os pacotes locais db/ e paginas/ sejam encontrados mesmo
+# quando o app e executado a partir de outro diretorio de trabalho.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from db import auth, conexao, modelo  # noqa: E402
 from paginas import clientes, financeiro, historico, producao, prazos, visao_geral
 
 st.set_page_config(
