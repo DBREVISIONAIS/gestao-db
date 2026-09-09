@@ -30,13 +30,21 @@ import streamlit as st
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from db import auth, conexao, modelo  # noqa: E402
-from paginas import clientes, financeiro, historico, producao, prazos, visao_geral
+from paginas import (
+    clientes,
+    financeiro,
+    historico,
+    prazos,
+    producao,
+    resultados,
+    visao_geral,
+)
 
 st.set_page_config(
     page_title="Gestão DB | Dutra Bitencourt",
     page_icon="⚖️",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 
 # Paleta institucional, a mesma usada nos dashboards do Google Sheets,
@@ -73,25 +81,33 @@ def aplicar_identidade_visual() -> None:
             font-family: Arial, Helvetica, sans-serif;
             font-weight: 700;
         }}
-        section[data-testid="stSidebar"] {{
-            background-color: {PALETA["AZUL_ESCURO"]};
-        }}
-        section[data-testid="stSidebar"] * {{ color: #FFFFFF !important; }}
-        section[data-testid="stSidebar"] .stButton button {{
-            background-color: {PALETA["AZUL_CLARO"]};
-            color: #FFFFFF !important;
-            border: none;
-            font-weight: 600;
-        }}
+        section[data-testid="stSidebar"] {{ display: none; }}
+        div[data-testid="stAppViewContainer"] > .main {{ padding-top: 1rem; }}
+
         div[data-testid="stMetric"] {{
             background-color: {PALETA["CINZA_FUNDO"]};
             border-left: 5px solid {PALETA["AZUL_CLARO"]};
             border-radius: 6px;
-            padding: 12px 16px;
+            padding: 12px 14px;
+            overflow: visible;
         }}
+        /* O Streamlit corta o valor com reticencias quando a coluna e
+           estreita. Aqui o valor pode quebrar linha e diminuir um pouco,
+           de modo que numeros longos apareçam inteiros. */
         div[data-testid="stMetricValue"] {{
             color: {PALETA["AZUL_ESCURO"]};
             font-weight: 700;
+            font-size: 1.55rem;
+            white-space: normal !important;
+            overflow: visible !important;
+            text-overflow: clip !important;
+            overflow-wrap: anywhere;
+            line-height: 1.2;
+        }}
+        div[data-testid="stMetricValue"] > div {{
+            white-space: normal !important;
+            overflow: visible !important;
+            text-overflow: clip !important;
         }}
         div[data-testid="stMetricLabel"] {{
             color: {PALETA["CINZA_TEXTO"]};
@@ -120,6 +136,15 @@ def aplicar_identidade_visual() -> None:
             text-transform: uppercase;
             letter-spacing: 0.12em;
         }}
+        /* Navegacao horizontal no topo */
+        div[data-testid="stSegmentedControl"] button {{
+            font-weight: 600;
+        }}
+        .barra-status {{
+            color: {PALETA["CINZA_TEXTO"]};
+            font-size: 0.78rem;
+            padding-top: 6px;
+        }}
         </style>
         """,
         unsafe_allow_html=True,
@@ -147,6 +172,7 @@ FONTES_POR_PAGINA = {
     "Prazos": ("prazos",),
     "Clientes": ("clientes",),
     "Financeiro": ("clientes",),
+    "Resultados": ("prazos",),
     "Produção": ("prazos", "logs"),
     "Histórico e auditoria": ("logs", "ids"),
 }
@@ -166,35 +192,36 @@ def limpar_tudo() -> None:
     modelo.estado_do_espelho.clear()
 
 
-def barra_lateral(usuario: dict) -> str:
-    with st.sidebar:
-        st.markdown(f"### {usuario['nome']}")
-        if not auth.modo_senha_unica():
-            st.caption(f"Perfil: {usuario['perfil']}")
-        st.divider()
+def barra_superior(usuario: dict) -> str:
+    """
+    Navegacao no topo, em vez de barra lateral.
 
-        pagina = st.radio(
+    Com a lateral ocupando espaco, os cartoes de indicador ficavam
+    estreitos e o Streamlit truncava os valores com reticencias. No
+    topo, o conteudo usa a largura inteira da tela.
+    """
+    paginas = auth.regras_atuais()["paginas"]
+
+    navegacao, atualizar, sair = st.columns([8, 1.3, 1])
+
+    with navegacao:
+        pagina = st.segmented_control(
             "Painel",
-            auth.regras_atuais()["paginas"],
-            label_visibility="collapsed",
+            paginas,
+            default=st.session_state.get("pagina_atual") or paginas[0],
             key="pagina_atual",
+            label_visibility="collapsed",
         )
-
-        st.divider()
-        _estado_do_espelho()
-        st.caption(f"Última leitura do painel: {conexao.rotulo_ultima_leitura()}")
-        if st.button("Atualizar agora", width="stretch"):
+    with atualizar:
+        if st.button("Atualizar", width="stretch"):
             limpar_tudo()
             st.rerun()
-        st.caption(
-            f"Cache de {conexao.TTL_CACHE}s. O painel não escreve nas planilhas."
-        )
-
+    with sair:
         if st.button("Sair", width="stretch"):
             st.session_state.clear()
             st.rerun()
 
-    return pagina
+    return pagina or paginas[0]
 
 
 def _estado_do_espelho() -> None:
@@ -219,7 +246,13 @@ def _estado_do_espelho() -> None:
             "Verifique o gatilho de atualização na planilha auxiliar."
         )
     else:
-        st.caption(f"Espelho atualizado em: {momento}")
+        st.markdown(
+            f'<div class="barra-status">Espelho atualizado em {momento}'
+            f' · última leitura do painel {conexao.rotulo_ultima_leitura()}'
+            f' · cache de {conexao.TTL_CACHE}s · o painel não escreve nas '
+            f'planilhas</div>',
+            unsafe_allow_html=True,
+        )
 
     problemas = [
         f"{chave.replace('ESPELHO_', '')}: {valor}"
@@ -255,10 +288,15 @@ def main() -> None:
         auth.tela_de_login()
         return
 
-    pagina = barra_lateral(usuario)
-    dados = carregar(pagina)
+    # O cabecalho vem antes do carregamento de proposito: se a leitura
+    # falhar e a execucao parar, a tela de erro ainda aparece dentro da
+    # identidade visual, e nao numa pagina em branco.
+    cabecalho(f"Painel de gestão · {usuario['nome']}")
 
-    cabecalho(pagina)
+    pagina = barra_superior(usuario)
+    _estado_do_espelho()
+
+    dados = carregar(pagina)
 
     if pagina == "Visão geral":
         visao_geral.render(dados["prazos"], dados["clientes"])
@@ -268,6 +306,8 @@ def main() -> None:
         clientes.render(dados["clientes"])
     elif pagina == "Financeiro":
         financeiro.render(dados["clientes"])
+    elif pagina == "Resultados":
+        resultados.render(dados["prazos"])
     elif pagina == "Produção":
         producao.render(dados["prazos"], dados["logs"])
     elif pagina == "Histórico e auditoria":

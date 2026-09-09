@@ -245,3 +245,161 @@ def formatar_data_hora(valor) -> str:
     if pd.isna(data):
         return ""
     return data.strftime("%d/%m/%Y %H:%M:%S")
+
+
+# ------------------------------------------- resultados processuais
+
+_MOTIVOS = (
+    ("PRESCRIÇÃO", r"PRESCRICAO"),
+    ("DECADÊNCIA", r"DECADENCIA"),
+    ("LAUDO OU PERÍCIA DESFAVORÁVEL", r"LAUDO.{0,40}DESFAVORAVEL|PERICIA.{0,40}DESFAVORAVEL"),
+    ("LAUDO OU PERÍCIA FAVORÁVEL", r"LAUDO.{0,40}FAVORAVEL|PERICIA.{0,40}FAVORAVEL"),
+    ("DOCUMENTAÇÃO OU PROVA INSUFICIENTE",
+     r"DOCUMENTACAO INSUFICIENTE|DOCUMENTOS INSUFICIENTES|AUSENCIA DE PROVA|FALTA DE PROVA"),
+    ("ILEGITIMIDADE", r"ILEGITIMIDADE"),
+    ("FALTA DE INTERESSE PROCESSUAL", r"FALTA DE INTERESSE|AUSENCIA DE INTERESSE"),
+    ("HONORÁRIOS PERICIAIS", r"HONORARIOS PERICIAIS"),
+    ("SUCUMBÊNCIA", r"SUCUMBENCIA"),
+)
+
+
+def classificar_motivo_resultado(texto: str) -> str:
+    """Espelha classificarMotivoResultado_ do Apps Script."""
+    motivos = [rotulo for rotulo, padrao in _MOTIVOS if re.search(padrao, texto)]
+    return " | ".join(motivos) if motivos else "NÃO REGISTRADO NO CONTROLE"
+
+
+def extrair_resultados_processuais(conteudo, observacao) -> list[dict]:
+    """
+    Espelha extrairResultadosProcessuais_ do Apps Script.
+
+    Um mesmo registro pode gerar mais de um resultado, por exemplo AJG
+    deferida e liminar indeferida no mesmo andamento. A ordem dos testes
+    importa: parcial antes de procedente, nao acolhidos antes de
+    acolhidos. Alterar aqui exige alterar o .gs, senao painel e
+    dashboard passam a divergir.
+    """
+    partes = [str(v).strip() for v in (conteudo, observacao) if valor_preenchido(v)]
+    vistos, unicas = set(), []
+    for parte in partes:
+        chave = normalizar_texto(parte)
+        if chave and chave not in vistos:
+            vistos.add(chave)
+            unicas.append(parte)
+
+    registro = " | ".join(unicas)
+    texto = normalizar_texto(registro)
+    if not texto:
+        return []
+
+    motivo = classificar_motivo_resultado(texto)
+    resultados: list[dict] = []
+
+    def adicionar(categoria: str, resultado: str) -> None:
+        if any(
+            r["categoria"] == categoria and r["resultado"] == resultado
+            for r in resultados
+        ):
+            return
+        resultados.append(
+            {
+                "categoria": categoria,
+                "resultado": resultado,
+                "motivo": motivo,
+                "texto": registro[:600],
+            }
+        )
+
+    busca = lambda padrao: bool(re.search(padrao, texto))  # noqa: E731
+
+    parcial = busca(r"PARCIALMENTE PROCEDENTE|PARCIAL PROCEDENTE|PROCEDENTE EM PARTE")
+    improcedente = busca(r"SENTENCA.{0,100}IMPROCEDENTE|IMPROCEDENTE.{0,100}SENTENCA")
+    extincao = busca(r"SENTENCA DE EXTINCAO|SENTENCA EXTINCAO|SENTENCA.{0,80}EXTINCAO")
+    desconstituida = busca(r"SENTENCA.{0,80}DESCONSTITUIDA")
+    procedente = busca(r"SENTENCA.{0,100}PROCEDENTE") and not improcedente and not parcial
+    inicia_sentenca = busca(r"^SENTENCA\b")
+    fase_posterior = busca(
+        r"CUMPRIMENTO DE SENTENCA|TRANSITO EM JULGADO|CUSTAS.{0,30}SENTENCA|BAIXA.{0,30}SENTENCA"
+    )
+
+    if parcial:
+        adicionar("SENTENÇA", "PARCIALMENTE PROCEDENTE")
+    elif improcedente:
+        adicionar("SENTENÇA", "IMPROCEDENTE")
+    elif extincao:
+        adicionar("SENTENÇA", "EXTINÇÃO")
+    elif desconstituida:
+        adicionar("SENTENÇA", "DESCONSTITUÍDA")
+    elif procedente:
+        adicionar("SENTENÇA", "PROCEDENTE")
+    elif inicia_sentenca and not fase_posterior:
+        adicionar("SENTENÇA", "SEM CLASSIFICAÇÃO")
+
+    ajg_deferida = busca(
+        r"\bAJG (DEFERIDA|CONCEDIDA)\b|JUSTICA GRATUITA (DEFERIDA|CONCEDIDA)\b"
+        r"|GRATUIDADE DA JUSTICA (DEFERIDA|CONCEDIDA)\b|CONCEDIDA A GRATUIDADE DA JUSTICA"
+    )
+    ajg_indeferida = busca(
+        r"\bAJG (INDEFERIDA|INDFEFERIDA|NEGADA)\b"
+        r"|JUSTICA GRATUITA (INDEFERIDA|INDFEFERIDA|NEGADA)\b"
+        r"|GRATUIDADE DA JUSTICA (INDEFERIDA|NAO CONCEDIDA|NEGADA)\b"
+    )
+    if ajg_indeferida:
+        adicionar("JUSTIÇA GRATUITA", "INDEFERIDA")
+    elif ajg_deferida:
+        adicionar("JUSTIÇA GRATUITA", "DEFERIDA")
+
+    if busca(r"\bLIMINAR\b"):
+        if busca(
+            r"LIMINAR.{0,80}(INDEFERIDA|NAO CONCEDIDA|NEGADA)"
+            r"|(INDEFERIDA|NAO CONCEDIDA|NEGADA).{0,80}LIMINAR"
+        ):
+            adicionar("LIMINAR", "INDEFERIDA")
+        elif busca(r"LIMINAR.{0,80}(DEFERIDA|CONCEDIDA)|(DEFERIDA|CONCEDIDA).{0,80}LIMINAR"):
+            adicionar("LIMINAR", "DEFERIDA")
+        elif busca(r"DECISAO LIMINAR|DESPACHO.{0,30}LIMINAR"):
+            adicionar("LIMINAR", "SEM CLASSIFICAÇÃO")
+
+    if busca(r"\bAGRAVO\b"):
+        if busca(r"AGRAVO.{0,100}NAO PROVIDO|NAO PROVIDO.{0,100}AGRAVO"):
+            adicionar("AGRAVO", "NÃO PROVIDO")
+        elif busca(r"AGRAVO.{0,100}PROVIDO|PROVIDO.{0,100}AGRAVO"):
+            adicionar("AGRAVO", "PROVIDO")
+        elif busca(r"AGRAVO.{0,100}RECEBIDO.{0,100}SEM EFEITO SUSPENSIVO"):
+            adicionar("AGRAVO", "RECEBIDO SEM EFEITO SUSPENSIVO")
+        elif busca(r"AGRAVO.{0,100}RECEBIDO.{0,100}EFEITO SUSPENSIVO"):
+            adicionar("AGRAVO", "RECEBIDO COM EFEITO SUSPENSIVO")
+        elif busca(r"AGRAVO DE INSTRUMENTO|AGRAVO INTERNO|^AGRAVO\b") and not busca(
+            r"CONTRARRAZ|DOCUMENTOS.{0,30}AGRAVO"
+        ):
+            adicionar("AGRAVO", "INTERPOSTO OU PENDENTE")
+
+    if busca(r"\bEMBARGOS\b"):
+        contrarrazoes = busca(r"CONTRARRAZ")
+        sessao = busca(r"SESSAO.{0,40}EMBARGOS|AGUARDANDO.{0,40}EMBARGOS")
+        emb_parcial = busca(
+            r"EMBARGOS.{0,100}(ACOLHIDOS EM PARTE|PARCIALMENTE ACOLHIDOS|PARCIALMENTE PROVIDOS)"
+            r"|PARCIALMENTE.{0,60}EMBARGOS"
+        )
+        nao_acolhidos = busca(
+            r"EMBARGOS.{0,100}(NAO ACOLHIDOS|NAO COLHIDOS|NAO PROVIDOS)|NAO ACOLHIDOS.{0,80}EMBARGOS"
+        )
+        nao_conhecidos = busca(r"EMBARGOS.{0,100}NAO CONHECIDOS")
+        acolhidos = (
+            not nao_acolhidos
+            and not emb_parcial
+            and busca(r"EMBARGOS.{0,100}ACOLHIDOS|ACOLHIDOS.{0,80}EMBARGOS")
+        )
+
+        if emb_parcial:
+            adicionar("EMBARGOS", "PARCIALMENTE ACOLHIDOS")
+        elif nao_conhecidos:
+            adicionar("EMBARGOS", "NÃO CONHECIDOS")
+        elif nao_acolhidos:
+            adicionar("EMBARGOS", "NÃO ACOLHIDOS")
+        elif acolhidos:
+            adicionar("EMBARGOS", "ACOLHIDOS")
+        elif not contrarrazoes and not sessao and busca(r"^EMBARGOS\b"):
+            adicionar("EMBARGOS", "INTERPOSTOS OU PENDENTES")
+
+    return resultados

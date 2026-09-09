@@ -31,8 +31,10 @@ def render(logs: pd.DataFrame, base_ids: pd.DataFrame) -> None:
 
     if logs.empty:
         st.info(
-            "Nenhum registro encontrado. Verifique se a planilha de logs foi "
-            "informada nos Secrets e se contém a aba LOG_ALTERACOES."
+            "Nenhum histórico disponível ainda. O log continua sendo gravado "
+            "na planilha principal. Para que ele apareça aqui, instale o "
+            "arquivo PATCH_LOGS_EXTERNOS.gs no Apps Script da planilha "
+            "principal e execute a migração pelo menu Gestão DB — Migração."
         )
         return
 

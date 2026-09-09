@@ -19,8 +19,9 @@ ATALHOS = {
     "Todos": [],
     "Vencidos": ["VENCIDO"],
     "Vencem hoje": ["VENCE HOJE"],
-    "Próximos 7 dias": ["VENCE HOJE", "VENCE EM 7 DIAS"],
-    "Críticos": ["VENCIDO", "VENCE HOJE", "VENCE EM 7 DIAS"],
+    "Próximos 7 dias": ["VENCE HOJE", "PRÓXIMOS 7 DIAS"],
+    "8 a 15 dias": ["DE 8 A 15 DIAS"],
+    "Críticos": ["VENCIDO", "VENCE HOJE", "PRÓXIMOS 7 DIAS"],
 }
 
 COLUNAS_BUSCA = ["autor", "conteudo", "observacao", "responsavel", "delegado", "status"]
@@ -35,7 +36,9 @@ COLUNAS_TABELA = {
     "responsavel": "Responsável",
     "delegado": "Delegado",
     "status": "Status",
+    "status_padronizado": "Status padronizado",
     "situacao": "Situação",
+    "resumo_resultados": "Resultado processual",
     "verificacao_controladoria": "Controladoria",
     "link_bitrix": "Bitrix",
     "linha_origem": "Linha",
@@ -92,7 +95,7 @@ def painel(prazos: pd.DataFrame) -> None:
             somente_abertos = st.checkbox("Somente em aberto", value=True, key="pz_ab")
         with linha2[1]:
             filtrados = ui.filtro_periodo(
-                prazos, "prazo_fatal", "Prazo fatal entre", "pz_periodo"
+                prazos, "data_controle", "Data de controle entre", "pz_periodo"
             )
 
     situacoes = ATALHOS.get(atalho or "Todos", [])
@@ -107,16 +110,65 @@ def painel(prazos: pd.DataFrame) -> None:
 
     ui.resumo_filtro(len(prazos), len(filtrados))
 
-    colunas = st.columns(5)
+    abertos = filtrados[~filtrados["encerrado"]]
+
+    # Primeira faixa: distribuicao pela data de controle, que e o Prazo
+    # Fatal e, quando ele nao existe, a Data Final.
+    colunas = st.columns(6)
     ui.cartao(colunas[0], "No filtro", len(filtrados))
-    for indice, situacao in enumerate(
-        ["VENCIDO", "VENCE HOJE", "VENCE EM 7 DIAS", "NO PRAZO"], start=1
+    for indice, (rotulo, situacao) in enumerate(
+        [
+            ("Vencidos", "VENCIDO"),
+            ("Vencem hoje", "VENCE HOJE"),
+            ("Próximos 7 dias", "PRÓXIMOS 7 DIAS"),
+            ("De 8 a 15 dias", "DE 8 A 15 DIAS"),
+            ("Após 15 dias", "APÓS 15 DIAS"),
+        ],
+        start=1,
     ):
-        ui.cartao(
-            colunas[indice],
-            situacao.capitalize(),
-            int((filtrados["situacao"] == situacao).sum()),
-        )
+        ui.cartao(colunas[indice], rotulo, int((abertos["situacao"] == situacao).sum()))
+
+    # Segunda faixa: qualidade cadastral e etapa do fluxo.
+    colunas = st.columns(6)
+    ui.cartao(colunas[0], "Abertos", len(abertos))
+    ui.cartao(
+        colunas[1], "Protocolados",
+        int((filtrados["status_padronizado"] == "PROTOCOLADO").sum()),
+    )
+    ui.cartao(
+        colunas[2], "Pendentes",
+        int((abertos["status_padronizado"] == "PENDENTE").sum()),
+    )
+    ui.cartao(
+        colunas[3], "Para revisar",
+        int((abertos["status_padronizado"] == "PARA REVISAR").sum()),
+    )
+    ui.cartao(
+        colunas[4], "Sem status",
+        int((abertos["status_padronizado"] == "SEM STATUS").sum()),
+        "Pendência de preenchimento no controle.",
+    )
+    ui.cartao(
+        colunas[5], "Sem responsável",
+        int((abertos["responsavel"] == "SEM RESPONSÁVEL").sum()),
+        "Pendência de atribuição.",
+    )
+
+    # Terceira faixa: indicadores de tempo, iguais aos do DASH PRAZOS.
+    dias = filtrados["dias_evento_fatal"].dropna()
+    colunas = st.columns(4)
+    ui.cartao(
+        colunas[0], "Média evento até fatal",
+        f"{dias.mean():.1f}".replace(".", ",") if len(dias) else "—",
+        f"Dias corridos em {len(dias)} registro(s) com ambas as datas.",
+    )
+    ui.cartao(colunas[1], "Prazo mais curto", int(dias.min()) if len(dias) else "—")
+    ui.cartao(colunas[2], "Prazo mais longo", int(dias.max()) if len(dias) else "—")
+    ui.cartao(
+        colunas[3], "Sem data de controle",
+        int((filtrados["fonte_data"] == "SEM DATA").sum()),
+        "Sem Prazo Fatal válido e sem Data Final.",
+    )
 
     esquerda, direita = st.columns(2)
     with esquerda:
@@ -127,9 +179,11 @@ def painel(prazos: pd.DataFrame) -> None:
         _barra(filtrados, "tipo_prazo", "Tipo")
 
     st.markdown("#### Detalhamento")
-    ordenado = filtrados.sort_values("prazo_fatal", na_position="last")
+    ordenado = filtrados.sort_values("data_controle", na_position="last")
     ui.tabela(
-        ui.formatar_datas(ordenado, ["data_evento", "data_final", "prazo_fatal"]),
+        ui.formatar_datas(
+            ordenado, ["data_evento", "data_final", "prazo_fatal", "data_controle"]
+        ),
         COLUNAS_TABELA,
         "Nenhum prazo corresponde aos filtros aplicados.",
     )

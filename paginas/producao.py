@@ -65,7 +65,11 @@ def painel(prazos: pd.DataFrame, logs: pd.DataFrame) -> None:
             st.plotly_chart(figura, width="stretch")
 
     if logs.empty:
-        st.info("Nenhum registro no histórico de alterações.")
+        st.info(
+            "Sem histórico de alterações. Os indicadores de eventos por "
+            "editor aparecem depois que o log for migrado para a planilha "
+            "auxiliar."
+        )
         return
 
     st.markdown("#### Eventos registrados no período")

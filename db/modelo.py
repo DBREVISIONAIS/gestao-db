@@ -17,6 +17,7 @@ import streamlit as st
 from db import conexao
 from db.normalizacao import (
     classificar_resultado_sentenca,
+    extrair_resultados_processuais,
     classificar_tipo_prazo,
     converter_data,
     converter_numero,
@@ -47,10 +48,38 @@ STATUS_ENCERRADOS_CLIENTES = {"PROTOCOLADO", "DESCARTADO", "CONCLUIDO"}
 # --------------------------------------------------------------- prazos
 
 
-def _situacao_prazo(prazo_fatal, encerrado: bool, hoje) -> tuple[str, int | None]:
-    dias = diferenca_dias(hoje, prazo_fatal)
+def padronizar_status(status) -> str:
+    """
+    Reduz o status livre da planilha aos rotulos do dashboard.
+
+    A ordem dos testes importa: PROTOCOLADO antes de PROTOCOLAR, senao
+    "PARA PROTOCOLAR" seria lido como ja protocolado.
+    """
+    texto = normalizar_texto(status)
+    if not texto:
+        return "SEM STATUS"
+    if "PROTOCOLADO" in texto or "CONCLUIDO" in texto:
+        return "PROTOCOLADO"
+    if "PROTOCOLAR" in texto:
+        return "PARA PROTOCOLAR"
+    if "REVIS" in texto:
+        return "PARA REVISAR"
+    if "AGUARD" in texto:
+        return "AGUARDANDO"
+    if "PENDENTE" in texto:
+        return "PENDENTE"
+    return texto
+
+
+def _situacao_prazo(data_controle, encerrado: bool, hoje) -> tuple[str, int | None]:
+    """
+    Faixas iguais as do DASH PRAZOS, calculadas sobre a data de
+    controle, que e o Prazo Fatal e, quando ele nao for valido, a
+    Data Final.
+    """
+    dias = diferenca_dias(hoje, data_controle)
     if dias is None:
-        return "SEM PRAZO FATAL", None
+        return "SEM DATA DE CONTROLE", None
     if encerrado:
         return "ENCERRADO", dias
     if dias < 0:
@@ -58,8 +87,10 @@ def _situacao_prazo(prazo_fatal, encerrado: bool, hoje) -> tuple[str, int | None
     if dias == 0:
         return "VENCE HOJE", dias
     if dias <= 7:
-        return "VENCE EM 7 DIAS", dias
-    return "NO PRAZO", dias
+        return "PRÓXIMOS 7 DIAS", dias
+    if dias <= 15:
+        return "DE 8 A 15 DIAS", dias
+    return "APÓS 15 DIAS", dias
 
 
 @st.cache_data(ttl=conexao.TTL_CACHE, show_spinner="Lendo o controle de prazos...")
@@ -104,7 +135,21 @@ def carregar_prazos() -> pd.DataFrame:
             responsavel_controladoria = linha[posicao] if posicao < len(linha) else ""
 
         encerrado = normalizar_texto(status) in STATUS_ENCERRADOS_PRAZOS
-        situacao, dias_para_fatal = _situacao_prazo(prazo_fatal, encerrado, hoje)
+
+        # Data de controle: Prazo Fatal e, na ausencia dele, Data Final.
+        # Mesma regra do DASH PRAZOS. Sem esse fallback, milhares de
+        # registros ficariam fora da contagem operacional.
+        fatal = converter_data(prazo_fatal)
+        final = converter_data(data_final)
+        if pd.notna(fatal):
+            data_controle, fonte_data = fatal, "PRAZO FATAL"
+        elif pd.notna(final):
+            data_controle, fonte_data = final, "DATA FINAL"
+        else:
+            data_controle, fonte_data = pd.NaT, "SEM DATA"
+
+        situacao, dias_para_fatal = _situacao_prazo(data_controle, encerrado, hoje)
+        resultados = extrair_resultados_processuais(conteudo, observacao)
         data_referencia = converter_data(
             primeiro_preenchido([data_evento, prazo_fatal, data_final])
         )
@@ -127,10 +172,27 @@ def carregar_prazos() -> pd.DataFrame:
                 "verificacao_controladoria": valor_por_cabecalho(
                     linha, mapa, ["VERIFICACAO CONTROLADORIA"]
                 ),
+                "status_padronizado": padronizar_status(status),
                 "tipo_prazo": classificar_tipo_prazo(conteudo),
+                "data_controle": data_controle,
+                "fonte_data": fonte_data,
                 "situacao": situacao,
                 "dias_para_fatal": dias_para_fatal,
+                "dias_evento_fatal": diferenca_dias(data_evento, prazo_fatal),
                 "encerrado": encerrado,
+                "resultados": resultados,
+                "resumo_resultados": " | ".join(
+                    f"{r['categoria']}: {r['resultado']}" for r in resultados
+                ),
+                "motivo_resultado": " | ".join(
+                    sorted(
+                        {
+                            r["motivo"]
+                            for r in resultados
+                            if r["motivo"] != "NÃO REGISTRADO NO CONTROLE"
+                        }
+                    )
+                ),
                 "data_referencia": data_referencia,
             }
         )
@@ -143,7 +205,44 @@ def carregar_prazos() -> pd.DataFrame:
     dados["mes"] = dados["data_referencia"].dt.month
     dados["ano_fatal"] = dados["prazo_fatal"].dt.year
     dados["mes_fatal"] = dados["prazo_fatal"].dt.month
+    dados["competencia_controle"] = (
+        dados["data_controle"].dt.to_period("M").astype(str).replace("NaT", "")
+    )
     return dados
+
+
+def resultados_processuais(prazos: pd.DataFrame) -> pd.DataFrame:
+    """
+    Achata a lista de resultados de cada prazo em uma linha por
+    resultado. Espelha achatarResultadosProcessuais_ do Apps Script.
+    """
+    if prazos.empty or "resultados" not in prazos.columns:
+        return pd.DataFrame()
+
+    linhas = []
+    for _, prazo in prazos.iterrows():
+        for resultado in prazo["resultados"] or []:
+            linhas.append(
+                {
+                    "data_evento": prazo["data_evento"],
+                    "autor": prazo["autor"],
+                    "responsavel": prazo["responsavel"],
+                    "categoria": resultado["categoria"],
+                    "resultado": resultado["resultado"],
+                    "motivo": resultado["motivo"],
+                    "conteudo": resultado["texto"],
+                    "status": prazo["status"],
+                    "linha_origem": prazo["linha_origem"],
+                }
+            )
+
+    dados = pd.DataFrame(linhas)
+    if dados.empty:
+        return dados
+    dados["competencia"] = (
+        dados["data_evento"].dt.to_period("M").astype(str).replace("NaT", "")
+    )
+    return dados.sort_values("data_evento", ascending=False, na_position="last")
 
 
 # -------------------------------------------------------------- clientes
@@ -249,6 +348,9 @@ def carregar_clientes() -> pd.DataFrame:
                 ),
                 "diagnostico": valor_por_cabecalho(linha, mapa, ["DIAGNOSTICO"]),
                 "comentario": valor_por_cabecalho(linha, mapa, ["COMENTARIO"]),
+                "dias_contrato_ajuizamento": diferenca_dias(
+                    data_contrato, data_ajuizamento
+                ),
                 "encerrado": normalizar_texto(status) in STATUS_ENCERRADOS_CLIENTES,
                 "ajuizado": pd.notna(converter_data(data_ajuizamento)),
                 "possui_calculo": valor_preenchido(calculo_real) or valor_ajuizado != 0,
@@ -264,6 +366,9 @@ def carregar_clientes() -> pd.DataFrame:
     dados["mes"] = dados["data_referencia"].dt.month
     dados["ano_ajuizamento"] = dados["data_ajuizamento"].dt.year
     dados["mes_ajuizamento"] = dados["data_ajuizamento"].dt.month
+    dados["competencia_ajuizamento"] = (
+        dados["data_ajuizamento"].dt.to_period("M").astype(str).replace("NaT", "")
+    )
     return dados
 
 
@@ -298,9 +403,16 @@ COLUNAS_LOG = {
 
 @st.cache_data(ttl=conexao.TTL_CACHE, show_spinner="Lendo o histórico de alterações...")
 def carregar_logs() -> pd.DataFrame:
-    matriz = conexao.ler_aba_recente(
-        conexao.id_planilha_logs(), ABA_LOG, conexao.limite_log()
-    )
+    # A aba pode ainda nao existir, quando o patch do Apps Script que
+    # redireciona o log nao foi instalado. Nesse caso o painel segue
+    # funcionando sem historico, em vez de travar a tela inteira.
+    try:
+        matriz = conexao.ler_aba_recente(
+            conexao.id_planilha_logs(), ABA_LOG, conexao.limite_log()
+        )
+    except RuntimeError:
+        return pd.DataFrame()
+
     if len(matriz) < 2:
         return pd.DataFrame()
 

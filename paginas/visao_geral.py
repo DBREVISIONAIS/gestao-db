@@ -35,7 +35,7 @@ def render(prazos: pd.DataFrame, clientes: pd.DataFrame) -> None:
     ui.cartao(
         colunas[3],
         "Próximos 7 dias",
-        int((abertos["situacao"] == "VENCE EM 7 DIAS").sum())
+        int((abertos["situacao"] == "PRÓXIMOS 7 DIAS").sum())
         if not abertos.empty
         else 0,
     )
@@ -47,14 +47,17 @@ def render(prazos: pd.DataFrame, clientes: pd.DataFrame) -> None:
 
     if not abertos.empty:
         criticos = abertos[
-            abertos["situacao"].isin(["VENCIDO", "VENCE HOJE", "VENCE EM 7 DIAS"])
-        ].sort_values("prazo_fatal", na_position="last")
+            abertos["situacao"].isin(["VENCIDO", "VENCE HOJE", "PRÓXIMOS 7 DIAS"])
+        ].sort_values("data_controle", na_position="last")
 
         st.markdown("#### Prazos críticos")
         ui.tabela(
-            ui.formatar_datas(criticos.head(50), ["prazo_fatal", "data_evento"]),
+            ui.formatar_datas(
+                criticos.head(50), ["data_controle", "prazo_fatal", "data_evento"]
+            ),
             {
-                "prazo_fatal": "Fatal",
+                "data_controle": "Data de controle",
+                "fonte_data": "Fonte",
                 "autor": "Autor",
                 "conteudo": "Conteúdo",
                 "responsavel": "Responsável",

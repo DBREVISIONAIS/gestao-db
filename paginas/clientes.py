@@ -67,15 +67,42 @@ def painel(clientes: pd.DataFrame) -> None:
 
     ui.resumo_filtro(len(clientes), len(filtrados))
 
-    colunas = st.columns(4)
-    ui.cartao(colunas[0], "Clientes no filtro", len(filtrados))
-    ui.cartao(colunas[1], "Ativos", int((~filtrados["encerrado"]).sum()))
-    ui.cartao(colunas[2], "Ajuizados", int(filtrados["ajuizado"].sum()))
+    colunas = st.columns(5)
+    ui.cartao(colunas[0], "Clientes na carteira", len(filtrados))
     ui.cartao(
-        colunas[3],
-        "Com cálculo",
+        colunas[1], "Protocolados",
+        int((filtrados["status"].str.contains("PROTOCOLAD", na=False)).sum()),
+    )
+    ui.cartao(
+        colunas[2], "Checklist",
+        int((filtrados["status"].str.contains("CHECKLIST", na=False)).sum()),
+    )
+    ui.cartao(colunas[3], "Ajuizados", int(filtrados["ajuizado"].sum()))
+    ui.cartao(
+        colunas[4], "Com cálculo",
         int(filtrados["possui_calculo"].sum()),
         "Possui RT confirmada pela contabilista ou valor ajuizado consolidado.",
+    )
+
+    colunas = st.columns(4)
+    for indice, etapa in enumerate(["MINUTA", "ESTRATÉGIA", "REVISÃO", "CÁLCULO"]):
+        ui.cartao(
+            colunas[indice], etapa.capitalize(),
+            int((filtrados["status"].str.upper() == etapa).sum()),
+        )
+
+    colunas = st.columns(2)
+    ui.cartao(
+        colunas[0], "Sem responsável",
+        int((filtrados["responsavel"] == "SEM RESPONSÁVEL").sum()),
+        "Pendência de atribuição.",
+    )
+    dias = filtrados["dias_contrato_ajuizamento"].dropna()
+    dias = dias[dias >= 0]
+    ui.cartao(
+        colunas[1], "Média contrato até ajuizamento",
+        f"{dias.mean():.1f} dias".replace(".", ",") if len(dias) else "—",
+        f"Calculada sobre {len(dias)} caso(s) com as duas datas preenchidas.",
     )
 
     esquerda, direita = st.columns(2)
@@ -99,6 +126,14 @@ def painel(clientes: pd.DataFrame) -> None:
             figura = px.line(serie, x="competencia", y="Quantidade", markers=True)
             figura.update_layout(height=340, xaxis_title="Competência")
             st.plotly_chart(figura, width="stretch")
+
+    st.markdown("#### Clientes por responsável")
+    por_responsavel = (
+        filtrados.groupby("responsavel").size().reset_index(name="Quantidade")
+        .sort_values("Quantidade", ascending=False)
+        .rename(columns={"responsavel": "Responsável"})
+    )
+    st.dataframe(por_responsavel, width="stretch", hide_index=True)
 
     st.markdown("#### Detalhamento")
     visao = ui.formatar_datas(
