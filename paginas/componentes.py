@@ -146,3 +146,67 @@ def resumo_filtro(total: int, filtrado: int) -> None:
         st.caption(f"{total} registro(s).")
     else:
         st.caption(f"{filtrado} de {total} registro(s) após os filtros.")
+
+
+def moeda_curta(valor) -> str:
+    """
+    Valor abreviado, para caber em tabela larga.
+
+    1.234.567 vira 1,23 mi e 45.000 vira 45,0 mil. Serve só para
+    exibição em matriz: nas tabelas de conferência o valor vai cheio.
+    """
+    try:
+        numero = float(valor)
+    except (TypeError, ValueError):
+        return "—"
+    if numero == 0:
+        return "—"
+    if abs(numero) >= 1_000_000:
+        return f"{numero / 1_000_000:.2f} mi".replace(".", ",")
+    if abs(numero) >= 1_000:
+        return f"{numero / 1_000:.1f} mil".replace(".", ",")
+    return f"{numero:.0f}"
+
+
+def matriz_compacta(
+    dados: pd.DataFrame,
+    indice: str,
+    coluna: str,
+    valor: str,
+    rotulo_indice: str,
+    formato: str = "moeda",
+) -> pd.DataFrame:
+    """
+    Tabela cruzada enxuta.
+
+    Colunas inteiramente zeradas saem, porque só empurram a informação
+    para fora da tela. Acrescenta uma coluna de total e, quando o
+    formato é moeda, abrevia os valores para caber sem rolagem.
+    """
+    if dados.empty:
+        return pd.DataFrame()
+
+    matriz = dados.pivot_table(
+        index=indice, columns=coluna, values=valor, aggfunc="sum", fill_value=0
+    )
+    matriz = matriz.loc[:, (matriz != 0).any(axis=0)]
+    if matriz.empty:
+        return pd.DataFrame()
+
+    matriz["TOTAL"] = matriz.sum(axis=1)
+    matriz = matriz.reset_index().rename(columns={indice: rotulo_indice})
+
+    if formato == "moeda":
+        for nome in matriz.columns:
+            if nome != rotulo_indice:
+                matriz[nome] = matriz[nome].apply(moeda_curta)
+    else:
+        # Tudo vira texto: misturar inteiro e travessão na mesma coluna
+        # quebra a serialização da tabela.
+        for nome in matriz.columns:
+            if nome != rotulo_indice:
+                matriz[nome] = (
+                    matriz[nome].astype(int).astype(str).replace("0", "—")
+                )
+
+    return matriz
