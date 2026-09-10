@@ -342,27 +342,44 @@ def painel(clientes: pd.DataFrame) -> None:
     )
     filtrados = ui.aplicar_multiselecao(filtrados, "responsavel", responsaveis)
 
+    # Duas bases distintas, e confundi-las produz número errado.
+    #
+    # AJUIZADOS: quem tem Data do Ajuizamento dentro do período. É o
+    # realizado, e é o que bate com o DASH CLIENTES.
+    #
+    # FILTRADOS: a carteira inteira do recorte, incluindo quem ainda
+    # não foi protocolado. O filtro de data preserva de propósito quem
+    # não tem data, senão minuta e checklist sumiriam da tela.
     ajuizados = filtrados[filtrados["ajuizado"]]
-    total_previsto = filtrados["honorario_total"].sum()
-    media = total_previsto / len(ajuizados) if len(ajuizados) else 0
+    realizado = ajuizados["honorario_total"].sum()
+    carteira = filtrados["honorario_total"].sum()
+    media = realizado / len(ajuizados) if len(ajuizados) else 0
 
     colunas = st.columns(4)
     ui.cartao(colunas[0], "Ajuizamentos no período", len(ajuizados))
-    ui.cartao(colunas[1], "Honorários no período", formatar_moeda(total_previsto))
-    ui.cartao(colunas[2], "Média por ajuizamento", formatar_moeda(media))
     ui.cartao(
-        colunas[3], "Valor ajuizado consolidado",
-        formatar_moeda(filtrados["valor_ajuizado"].sum()),
+        colunas[1], "Honorários dos ajuizamentos", formatar_moeda(realizado),
+        "Soma apenas dos clientes com Data do Ajuizamento no período.",
+    )
+    ui.cartao(
+        colunas[2], "Média por ajuizamento", formatar_moeda(media),
+        "Honorários dos ajuizamentos dividido pela quantidade de ajuizamentos.",
+    )
+    ui.cartao(
+        colunas[3], "Previsto na carteira", formatar_moeda(carteira),
+        f"Todos os {len(filtrados)} clientes do recorte, protocolados ou não. "
+        f"A diferença de {formatar_moeda(carteira - realizado)} está em etapas "
+        "anteriores ao protocolo.",
     )
 
     colunas = st.columns(3)
     ui.cartao(
-        colunas[0], "Honorários contratuais",
-        formatar_moeda(filtrados["honorario_previsto"].sum()),
+        colunas[0], "Contratuais dos ajuizamentos",
+        formatar_moeda(ajuizados["honorario_previsto"].sum()),
     )
     ui.cartao(
-        colunas[1], "Honorários sucumbenciais",
-        formatar_moeda(filtrados["honorario_sucumbencial"].sum()),
+        colunas[1], "Sucumbenciais dos ajuizamentos",
+        formatar_moeda(ajuizados["honorario_sucumbencial"].sum()),
     )
     dias = filtrados["dias_contrato_ajuizamento"].dropna()
     dias = dias[dias >= 0]
@@ -377,31 +394,45 @@ def painel(clientes: pd.DataFrame) -> None:
     esquerda, direita = st.columns(2)
     with esquerda:
         st.markdown("#### Por responsável")
-        por_responsavel = (
+        carteira_resp = (
             filtrados.groupby("responsavel")
             .agg(
                 clientes=("cliente", "count"),
-                ajuizamentos=("ajuizado", "sum"),
+                carteira=("honorario_total", "sum"),
+            )
+            .reset_index()
+        )
+        realizado_resp = (
+            ajuizados.groupby("responsavel")
+            .agg(
+                ajuizamentos=("cliente", "count"),
                 honorario_total=("honorario_total", "sum"),
             )
             .reset_index()
-            .sort_values("honorario_total", ascending=False)
         )
+        por_responsavel = carteira_resp.merge(
+            realizado_resp, on="responsavel", how="left"
+        ).fillna({"ajuizamentos": 0, "honorario_total": 0})
         por_responsavel["media"] = por_responsavel["honorario_total"] / (
             por_responsavel["ajuizamentos"].replace(0, pd.NA)
         )
+        por_responsavel = por_responsavel.sort_values(
+            "honorario_total", ascending=False
+        )
         colunas_valor = ui.remover_colunas_vazias(
-            por_responsavel, ["honorario_total", "media"]
+            por_responsavel, ["carteira", "honorario_total", "media"]
         )
         rotulos = {
             "responsavel": "Responsável",
             "clientes": "Clientes",
             "ajuizamentos": "Ajuizados",
         }
-        rotulos.update(
-            {c: {"honorario_total": "Previsto", "media": "Média"}[c]
-             for c in colunas_valor}
-        )
+        nomes = {
+            "carteira": "Carteira",
+            "honorario_total": "Ajuizado",
+            "media": "Média",
+        }
+        rotulos.update({c: nomes[c] for c in colunas_valor})
         ui.tabela(
             ui.formatar_moedas(por_responsavel, colunas_valor),
             rotulos,
@@ -410,6 +441,7 @@ def painel(clientes: pd.DataFrame) -> None:
 
     with direita:
         st.markdown("#### Por status da carteira")
+        st.caption("Previsto de toda a carteira, independentemente do protocolo.")
         por_status = (
             filtrados.groupby("status")
             .agg(

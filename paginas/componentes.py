@@ -124,11 +124,18 @@ def formatar_moedas(dados: pd.DataFrame, colunas: list[str]) -> pd.DataFrame:
     saida = dados.copy()
     for coluna in colunas:
         if coluna in saida.columns:
-            saida[coluna] = saida[coluna].apply(
-                lambda v: f"R$ {v:,.2f}".replace(",", "@")
-                .replace(".", ",")
-                .replace("@", ".")
-            )
+            def _formatar(valor):
+                # Valor ausente vira travessão. "R$ <NA>" aparecia na
+                # linha de quem tem carteira mas nenhum ajuizamento.
+                if pd.isna(valor):
+                    return "—"
+                return (
+                    f"R$ {valor:,.2f}".replace(",", "@")
+                    .replace(".", ",")
+                    .replace("@", ".")
+                )
+
+            saida[coluna] = saida[coluna].apply(_formatar)
     return saida
 
 
