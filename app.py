@@ -231,7 +231,7 @@ FONTES_POR_PAGINA = {
     "Prazos": ("prazos",),
     "Clientes": ("clientes",),
     "Financeiro": ("clientes",),
-    "Resultados": ("prazos",),
+    "Resultados": ("resultados",),
     "Produção": ("prazos", "logs"),
     "Logs e ciclos": ("logs", "clientes"),
     "Histórico e auditoria": ("logs", "ids"),
@@ -242,6 +242,7 @@ CARREGADORES = {
     "clientes": modelo.carregar_clientes,
     "logs": modelo.carregar_logs,
     "ids": modelo.carregar_base_ids,
+    "resultados": modelo.carregar_resultados,
 }
 
 
@@ -367,7 +368,7 @@ def main() -> None:
     elif pagina == "Financeiro":
         financeiro.render(dados["clientes"])
     elif pagina == "Resultados":
-        resultados.render(dados["prazos"])
+        resultados.render(dados["resultados"])
     elif pagina == "Produção":
         producao.render(dados["prazos"], dados["logs"])
     elif pagina == "Logs e ciclos":

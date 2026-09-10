@@ -17,15 +17,10 @@ from db import auth, modelo
 from paginas import componentes as ui
 
 
-def render(prazos: pd.DataFrame) -> None:
+def render(resultados: pd.DataFrame) -> None:
     st.subheader("Resultados processuais")
 
-    prazos = auth.aplicar_recorte(prazos)
-    if prazos.empty:
-        st.info("Nenhum prazo disponível.")
-        return
-
-    resultados = modelo.resultados_processuais(prazos)
+    resultados = auth.aplicar_recorte(resultados)
     if resultados.empty:
         st.info(
             "Nenhum resultado identificado no conteúdo ou na observação "

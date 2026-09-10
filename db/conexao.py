@@ -24,14 +24,18 @@ def _ttl_cache() -> int:
     """
     TTL do cache, em segundos, lido dos Secrets.
 
-    A leitura acontece no momento em que o modulo e importado, porque o
-    decorador st.cache_data exige o TTL fixo. Se os Secrets ainda nao
-    estiverem disponiveis, cai no padrao de 120 segundos.
+    O padrao e 300 de proposito. O espelho da planilha auxiliar so e
+    recalculado a cada 10 minutos pelo gatilho do Apps Script, entao
+    cachear por menos que isso nao traz dado novo: apenas multiplica as
+    leituras no Google e deixa a navegacao mais lenta.
+
+    A leitura acontece na importacao do modulo porque o decorador de
+    cache exige o TTL fixo.
     """
     try:
-        return int(st.secrets.get("CACHE_TTL_SEGUNDOS", 120))
+        return int(st.secrets.get("CACHE_TTL_SEGUNDOS", 300))
     except Exception:  # noqa: BLE001 - secrets indisponivel na importacao
-        return 120
+        return 300
 
 
 TTL_CACHE = _ttl_cache()
@@ -46,10 +50,14 @@ def _cliente_gspread():
     return gspread.authorize(credenciais)
 
 
-@st.cache_data(ttl=TTL_CACHE, show_spinner=False)
+@st.cache_resource(ttl=TTL_CACHE, show_spinner=False)
 def ler_aba(id_planilha: str, nome_aba: str) -> list[list[str]]:
     """
     Devolve a matriz bruta da aba, com a primeira linha de cabecalhos.
+
+    Usa cache_resource, e nao cache_data, porque a matriz e grande e o
+    ciclo de serializacao do cache_data era cobrado a cada troca de
+    tela. O objeto e tratado como somente leitura pelo resto do codigo.
 
     Retorna valores formatados (get_all_values), nao valores brutos.
     Isso e proposital: as datas chegam em dd/mm/aaaa e os valores em
@@ -76,7 +84,7 @@ def ler_aba(id_planilha: str, nome_aba: str) -> list[list[str]]:
     return aba.get_all_values()
 
 
-@st.cache_data(ttl=TTL_CACHE, show_spinner=False)
+@st.cache_resource(ttl=TTL_CACHE, show_spinner=False)
 def ler_aba_recente(id_planilha: str, nome_aba: str, limite: int) -> list[list[str]]:
     """
     Le o cabecalho e apenas as ultimas `limite` linhas da aba.

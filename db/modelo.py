@@ -94,7 +94,7 @@ def _situacao_prazo(data_controle, encerrado: bool, hoje) -> tuple[str, int | No
     return "APÓS 15 DIAS", dias
 
 
-@st.cache_data(ttl=conexao.TTL_CACHE, show_spinner="Lendo o controle de prazos...")
+@st.cache_resource(ttl=conexao.TTL_CACHE, show_spinner="Lendo o controle de prazos...")
 def carregar_prazos() -> pd.DataFrame:
     matriz = conexao.ler_aba(conexao.id_planilha_auxiliar(), ABA_PRAZOS)
     if len(matriz) < 2:
@@ -229,6 +229,18 @@ def carregar_prazos() -> pd.DataFrame:
     return dados
 
 
+@st.cache_resource(ttl=conexao.TTL_CACHE, show_spinner=False)
+def carregar_resultados() -> pd.DataFrame:
+    """
+    Resultados processuais já achatados e em cache.
+
+    A extração percorre linha a linha e roda dezenas de expressões
+    regulares por registro. Fazer isso a cada troca de aba custava
+    segundos; aqui é feito uma vez por ciclo de cache.
+    """
+    return resultados_processuais(carregar_prazos())
+
+
 def resultados_processuais(prazos: pd.DataFrame) -> pd.DataFrame:
     """
     Achata a lista de resultados de cada prazo em uma linha por
@@ -266,7 +278,7 @@ def resultados_processuais(prazos: pd.DataFrame) -> pd.DataFrame:
 # -------------------------------------------------------------- clientes
 
 
-@st.cache_data(ttl=conexao.TTL_CACHE, show_spinner="Lendo o controle de clientes...")
+@st.cache_resource(ttl=conexao.TTL_CACHE, show_spinner="Lendo o controle de clientes...")
 def carregar_clientes() -> pd.DataFrame:
     matriz = conexao.ler_aba(conexao.id_planilha_auxiliar(), ABA_CLIENTES)
     if len(matriz) < 2:
@@ -460,7 +472,7 @@ def _nome_do_editor(email: str, chave: str) -> str:
     return "NÃO IDENTIFICADO"
 
 
-@st.cache_data(ttl=conexao.TTL_CACHE, show_spinner="Lendo o histórico de alterações...")
+@st.cache_resource(ttl=conexao.TTL_CACHE, show_spinner="Lendo o histórico de alterações...")
 def carregar_logs() -> pd.DataFrame:
     # A aba pode ainda nao existir, quando o patch do Apps Script que
     # redireciona o log nao foi instalado. Nesse caso o painel segue
@@ -522,7 +534,7 @@ def carregar_logs() -> pd.DataFrame:
     return dados.reset_index(drop=True)
 
 
-@st.cache_data(ttl=conexao.TTL_CACHE, show_spinner=False)
+@st.cache_resource(ttl=conexao.TTL_CACHE, show_spinner=False)
 def carregar_base_ids() -> pd.DataFrame:
     """
     Le a BASE IDS espelhada, se ela existir.
@@ -547,7 +559,7 @@ def carregar_base_ids() -> pd.DataFrame:
 # ------------------------------------------------- estado do espelho
 
 
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_resource(ttl=conexao.TTL_CACHE, show_spinner=False)
 def estado_do_espelho() -> dict:
     """
     Le a aba CONTROLE_BI, escrita pelo Apps Script da auxiliar a cada
@@ -626,36 +638,46 @@ def permanencia_por_etapa(transicoes: pd.DataFrame) -> pd.DataFrame:
     transição seguinte do mesmo registro. Ciclos sem saída são os
     casos que ainda estão na etapa e ficam de fora da média de ciclos
     completos, exatamente como no DASH LOGS.
+
+    Cálculo vetorizado: a saída sai de um shift dentro do grupo. A
+    versão anterior percorria linha a linha e levava segundos em bases
+    com dezenas de milhares de transições.
     """
     if transicoes.empty:
         return pd.DataFrame()
 
-    linhas = []
-    for chave, grupo in transicoes.groupby("chave_registro"):
-        grupo = grupo.sort_values("data_hora")
-        registros = grupo.to_dict("records")
-        for indice, atual in enumerate(registros):
-            seguinte = registros[indice + 1] if indice + 1 < len(registros) else None
-            entrada = atual["data_hora"]
-            saida = seguinte["data_hora"] if seguinte else pd.NaT
-            corridos = (
-                (saida - entrada).total_seconds() / 86400 if pd.notna(saida) else None
-            )
-            linhas.append(
-                {
-                    "chave_registro": chave,
-                    "cliente": atual["cliente_autor"],
-                    "etapa": atual["para"],
-                    "entrada": entrada,
-                    "saida": saida,
-                    "dias_corridos": round(corridos, 1) if corridos is not None else None,
-                    "dias_uteis": _dias_uteis(entrada, saida),
-                    "editor_entrada": atual["editor"],
-                    "concluido": seguinte is not None,
-                }
-            )
+    base = transicoes.sort_values(["chave_registro", "data_hora"]).copy()
+    base["saida"] = base.groupby("chave_registro")["data_hora"].shift(-1)
 
-    return pd.DataFrame(linhas)
+    entrada = pd.to_datetime(base["data_hora"], errors="coerce")
+    saida = pd.to_datetime(base["saida"], errors="coerce")
+    completo = entrada.notna() & saida.notna()
+
+    corridos = pd.Series(pd.NA, index=base.index, dtype="Float64")
+    corridos[completo] = (
+        (saida[completo] - entrada[completo]).dt.total_seconds() / 86400
+    ).round(1)
+
+    uteis = pd.Series(pd.NA, index=base.index, dtype="Float64")
+    if completo.any():
+        uteis[completo] = np.busday_count(
+            entrada[completo].dt.date.to_numpy(dtype="datetime64[D]"),
+            saida[completo].dt.date.to_numpy(dtype="datetime64[D]"),
+        ).astype(float)
+
+    return pd.DataFrame(
+        {
+            "chave_registro": base["chave_registro"].to_numpy(),
+            "cliente": base["cliente_autor"].to_numpy(),
+            "etapa": base["para"].to_numpy(),
+            "entrada": entrada.to_numpy(),
+            "saida": saida.to_numpy(),
+            "dias_corridos": corridos.to_numpy(),
+            "dias_uteis": uteis.to_numpy(),
+            "editor_entrada": base["editor"].to_numpy(),
+            "concluido": completo.to_numpy(),
+        }
+    )
 
 
 def ciclos_do_cliente(
@@ -668,69 +690,70 @@ def ciclos_do_cliente(
     protocolo é a Data do Ajuizamento quando existir e, na falta dela,
     a primeira transição para PROTOCOLADO. Casos sem marco entram como
     pendência de informação, e não como atraso.
+
+    O log agrupa por ID permanente e o cadastro de clientes não tem
+    esse ID, então o casamento é feito pelo nome normalizado do cliente
+    registrado na própria linha do log.
     """
     if clientes.empty:
         return pd.DataFrame()
 
-    # O log agrupa por ID permanente, mas o cadastro de clientes não
-    # tem esse ID. Por isso os marcos são indexados pelas duas chaves:
-    # o ID e o nome normalizado. Sem isso nenhum marco casava e as
-    # médias de ciclo apareciam vazias.
-    marcos: dict[str, dict] = {}
+    saida = clientes[
+        ["cliente", "servico", "responsavel", "status", "data_contrato", "data_ajuizamento"]
+    ].copy()
+    saida["chave"] = saida["cliente"].map(normalizar_texto)
+
+    marcos = pd.DataFrame(columns=["chave", "minuta", "pronta", "protocolo"])
     if not transicoes.empty:
-        for chave, grupo in transicoes.groupby("chave_registro"):
-            grupo = grupo.sort_values("data_hora")
-            minuta = grupo[grupo["para"].str.contains("MINUTA", na=False)]
-            protocolo = grupo[grupo["para"].str.contains("PROTOCOLADO", na=False)]
-            pronta = grupo[
-                grupo["para"].str.contains("PROTOCOLAR|REVIS", na=False, regex=True)
-            ]
-            marco = {
-                "minuta": minuta["data_hora"].min() if not minuta.empty else pd.NaT,
-                "pronta": pronta["data_hora"].min() if not pronta.empty else pd.NaT,
-                "protocolo": (
-                    protocolo["data_hora"].min() if not protocolo.empty else pd.NaT
-                ),
-            }
-            marcos[str(chave)] = marco
-            for nome in grupo["cliente_autor"].dropna().unique():
-                indice = normalizar_texto(nome)
-                if indice and indice not in marcos:
-                    marcos[indice] = marco
+        base = transicoes.copy()
+        base["chave"] = base["cliente_autor"].map(normalizar_texto)
+        base["data_hora"] = pd.to_datetime(base["data_hora"], errors="coerce")
+        alvo = base["para"].astype(str)
 
-    linhas = []
-    for _, cliente in clientes.iterrows():
-        marco = marcos.get(normalizar_texto(cliente["cliente"]), {})
-        contrato = cliente["data_contrato"]
-        protocolo = (
-            cliente["data_ajuizamento"]
-            if pd.notna(cliente["data_ajuizamento"])
-            else marco.get("protocolo", pd.NaT)
-        )
-        minuta = marco.get("minuta", pd.NaT)
-        pronta = marco.get("pronta", pd.NaT)
+        def primeiro(mascara, nome):
+            recorte = base[mascara]
+            if recorte.empty:
+                return pd.DataFrame(columns=["chave", nome])
+            return (
+                recorte.groupby("chave")["data_hora"].min().reset_index(name=nome)
+            )
 
-        def corridos(inicio, fim):
-            if pd.isna(inicio) or pd.isna(fim):
-                return None
-            return round((pd.Timestamp(fim) - pd.Timestamp(inicio)).days, 1)
+        marcos = primeiro(alvo.str.contains("MINUTA", na=False), "minuta")
+        for mascara, nome in (
+            (alvo.str.contains("PROTOCOLAR|REVIS", na=False, regex=True), "pronta"),
+            (alvo.str.contains("PROTOCOLADO", na=False), "protocolo"),
+        ):
+            marcos = marcos.merge(primeiro(mascara, nome), on="chave", how="outer")
 
-        linhas.append(
-            {
-                "cliente": cliente["cliente"],
-                "servico": cliente["servico"],
-                "responsavel": cliente["responsavel"],
-                "status": cliente["status"],
-                "contrato": contrato,
-                "minuta": minuta,
-                "pronta": pronta,
-                "protocolo": protocolo,
-                "contrato_minuta": corridos(contrato, minuta),
-                "contrato_protocolo": corridos(contrato, protocolo),
-                "pronta_protocolo": corridos(pronta, protocolo),
-                "contrato_minuta_uteis": _dias_uteis(contrato, minuta),
-                "contrato_protocolo_uteis": _dias_uteis(contrato, protocolo),
-            }
-        )
+    for coluna in ("minuta", "pronta", "protocolo"):
+        if coluna not in marcos.columns:
+            marcos[coluna] = pd.NaT
 
-    return pd.DataFrame(linhas)
+    saida = saida.merge(marcos, on="chave", how="left")
+    saida["protocolo"] = saida["data_ajuizamento"].fillna(saida["protocolo"])
+
+    def diferenca(inicio_col, fim_col):
+        inicio = pd.to_datetime(saida[inicio_col], errors="coerce")
+        fim = pd.to_datetime(saida[fim_col], errors="coerce")
+        return (fim - inicio).dt.days
+
+    def uteis(inicio_col, fim_col):
+        inicio = pd.to_datetime(saida[inicio_col], errors="coerce")
+        fim = pd.to_datetime(saida[fim_col], errors="coerce")
+        valido = inicio.notna() & fim.notna()
+        resultado = pd.Series(pd.NA, index=saida.index, dtype="Float64")
+        if valido.any():
+            resultado[valido] = np.busday_count(
+                inicio[valido].dt.date.to_numpy(dtype="datetime64[D]"),
+                fim[valido].dt.date.to_numpy(dtype="datetime64[D]"),
+            ).astype(float)
+        return resultado
+
+    saida["contrato"] = saida["data_contrato"]
+    saida["contrato_minuta"] = diferenca("data_contrato", "minuta")
+    saida["contrato_protocolo"] = diferenca("data_contrato", "protocolo")
+    saida["pronta_protocolo"] = diferenca("pronta", "protocolo")
+    saida["contrato_minuta_uteis"] = uteis("data_contrato", "minuta")
+    saida["contrato_protocolo_uteis"] = uteis("data_contrato", "protocolo")
+
+    return saida.drop(columns=["chave"])
