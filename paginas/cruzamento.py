@@ -1,45 +1,35 @@
 """
 Clientes e processos.
 
-Cruza o CONTROLE DE CLIENTES com o CONTROLE DE PRAZOS para responder,
-por cliente: em que etapa está, se já tem processo andando, qual o
-próximo prazo, quando houve a última movimentação e o que já saiu de
-resultado.
+Visão por cliente construída só com o CONTROLE DE CLIENTES. Cada linha
+do controle é uma demanda (um serviço, uma ação); o cliente é o
+conjunto das suas linhas.
 
-Como um prazo é ligado a um cliente, nesta ordem:
-    1. LINK BITRIX   mesmo negócio nas duas abas.
-    2. DE-PARA       aba DE_PARA da auxiliar, preenchida à mão.
-    3. NOME          nome-base igual nas duas abas.
-    4. PREFIXO       um nome-base é o começo do outro, com candidato único.
-    5. APROXIMADO    semelhança de grafia alta, com candidato único.
+O cruzamento com o controle de prazos foi retirado desta tela: sem
+número de processo nem ID comum entre as duas abas, a ligação por nome
+gerava divergência demais para servir de controle.
 
-Nome-base é o nome sem o que costuma vir de complemento no controle:
-texto entre parênteses, o que vem depois de " - ", número final e
-termos de serviço ou banco no fim (FEDERAL, AGIBANK, RMC...). Assim
-"MARIA SILVA (FEDERAL)", "MARIA SILVA - FEDERAL" e "MARIA SILVA
-AGIBANK 1" viram todos "MARIA SILVA".
-
-Limite conhecido: o controle de prazos não traz número de processo,
-então a visão é por cliente, não por ação. As ligações PREFIXO e
-APROXIMADO são inferência e aparecem marcadas para conferência.
+Agrupamento das linhas do mesmo cliente: pelo nome-base, que é o nome
+sem o complemento que a equipe costuma acrescentar no cadastro (texto
+entre parênteses, o que vem depois de " - ", número final e termos de
+serviço ou banco no fim). "MARIA SILVA (FEDERAL)" e "MARIA SILVA -
+AGIBANK 1" ficam juntos. A coluna "Nomes no cadastro" mostra o que foi
+agrupado, para conferência.
 """
 
 from __future__ import annotations
 
 import re
 from datetime import datetime
-from difflib import SequenceMatcher, get_close_matches
 
 import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from db import auth, modelo
+from db import auth
 from db.normalizacao import normalizar_texto
 from paginas import componentes as ui
 
-DIAS_PARADO_PADRAO = 60
-SITUACOES_ABERTAS_CRITICAS = {"VENCIDO", "VENCE HOJE", "PRÓXIMOS 7 DIAS"}
 SEM_RESP = "SEM RESPONSÁVEL"
 
 # Termos que aparecem no FIM do nome como complemento, e não como parte
@@ -60,28 +50,10 @@ SUFIXOS = {
 # Conectores que sobram no fim depois de tirar o sufixo ("... DO BRASIL").
 CONECTORES = {"DO", "DA", "DE", "DOS", "DAS", "E"}
 
-CORES = {
-    "PRAZO VENCIDO": "#C62828",
-    "ENCERRADO COM PRAZO ABERTO": "#8E24AA",
-    "AJUIZADO SEM PRAZO NO CONTROLE": "#EF6C00",
-    "PRAZO SEM AJUIZAMENTO NO CADASTRO": "#F7BD2E",
-    "PARADO": "#6D4C41",
-    "PRAZO NOS PRÓXIMOS 7 DIAS": "#4DA2DA",
-    "EM ANDAMENTO": "#2E7D32",
-    "PRÉ-AJUIZAMENTO": "#1A3762",
-    "ENCERRADO": "#C1B7AD",
-}
-
-
-# ------------------------------------------------------------- nomes
-
-
 def nome_base(valor) -> str:
     texto = str(valor or "")
     texto = re.sub(r"\([^)]*\)", " ", texto)
     texto = re.sub(r"\[[^\]]*\]", " ", texto)
-    # Corta no primeiro separador com espaço de algum lado. Hífen colado
-    # ("MARIA-JOSÉ") faz parte do nome e fica.
     texto = re.split(r"\s+[-–—|/]\s*|\s*[-–—|/]\s+", texto)[0]
     termos = normalizar_texto(texto).split()
     while len(termos) > 2 and (
@@ -94,88 +66,107 @@ def nome_base(valor) -> str:
     return " ".join(termos)
 
 
-def _chave_link(valor) -> str:
-    """Número do negócio no link do Bitrix, imune a barra final e parâmetros."""
-    texto = str(valor or "").strip().lower()
-    if not texto:
-        return ""
-    texto = texto.split("?")[0].split("#")[0].rstrip("/")
-    numero = re.search(r"(\d+)$", texto)
-    return numero.group(1) if numero else texto
+# ------------------------------------------------------------------ fases
+
+# Fase da demanda, do marco mais avançado para o menos avançado. É
+# derivada das datas que o próprio controle de clientes guarda, e não
+# do texto livre do status.
+FASES = [
+    "EXECUÇÃO CONCLUÍDA",
+    "FATURADO",
+    "TRANSITADO",
+    "SENTENCIADO",
+    "AJUIZADO",
+    "PRÉ-AJUIZAMENTO",
+    "DESCARTADO",
+]
+CORES_FASE = {
+    "EXECUÇÃO CONCLUÍDA": "#2E7D32",
+    "FATURADO": "#66BB6A",
+    "TRANSITADO": "#1A3762",
+    "SENTENCIADO": "#4DA2DA",
+    "AJUIZADO": "#F7BD2E",
+    "PRÉ-AJUIZAMENTO": "#C1B7AD",
+    "DESCARTADO": "#C62828",
+}
+
+# Marcos que viram eventos no histórico do cliente.
+MARCOS = {
+    "data_contrato": "Contrato",
+    "data_ajuizamento": "Ajuizamento",
+    "data_sentenca": "Sentença",
+    "data_transito": "Trânsito em julgado",
+    "data_primeiro_faturamento": "1º faturamento",
+    "data_faturamento_restituicao": "Faturamento da restituição",
+    "data_conclusao_execucao": "Conclusão da execução",
+}
 
 
-@st.cache_data(ttl=600, show_spinner="Cruzando nomes dos prazos com o cadastro...")
-def casar_nomes(
-    autores: tuple, bases: tuple, de_para: tuple
-) -> dict:
+def _data(linha, campo):
+    valor = linha.get(campo) if hasattr(linha, "get") else getattr(linha, campo, None)
+    return valor if isinstance(valor, pd.Timestamp) and pd.notna(valor) else None
+
+
+def fase_da_demanda(linha) -> str:
+    status = normalizar_texto(linha.get("status"))
+    if "DESCART" in status:
+        return "DESCARTADO"
+    if _data(linha, "data_conclusao_execucao"):
+        return "EXECUÇÃO CONCLUÍDA"
+    if _data(linha, "data_faturamento_restituicao") or _data(
+        linha, "data_primeiro_faturamento"
+    ):
+        return "FATURADO"
+    if _data(linha, "data_transito"):
+        return "TRANSITADO"
+    if _data(linha, "data_sentenca") or linha.get("resultado_sentenca") not in (
+        None, "", "SEM SENTENÇA"
+    ):
+        return "SENTENCIADO"
+    if linha.get("ajuizado"):
+        return "AJUIZADO"
+    return "PRÉ-AJUIZAMENTO"
+
+
+def ultimo_marco(linha) -> tuple:
     """
-    Autor (nome como está no prazo) -> (nome-base do cliente, método, semelhança).
+    Último marco com data preenchida: (nome, data).
 
-    Recebe só tuplas de texto, para o cache funcionar. A parte cara é a
-    comparação aproximada, e ela só roda para quem não casou antes.
+    Data futura é erro de digitação no controle e fica de fora, senão
+    viraria o "último marco" e o contador de dias sairia negativo.
     """
-    conjunto = set(bases)
-    manual = {}
-    for nome_prazo, nome_cliente in de_para:
-        alvo = nome_base(nome_cliente)
-        if alvo in conjunto:
-            manual[normalizar_texto(nome_prazo)] = alvo
-
-    por_primeiro = {}
-    for base in bases:
-        termos = base.split()
-        if termos:
-            por_primeiro.setdefault(termos[0], []).append(termos)
-
-    resultado = {}
-    for autor in autores:
-        chave = normalizar_texto(autor)
-        if chave in manual:
-            resultado[autor] = (manual[chave], "DE-PARA", 1.0)
-            continue
-
-        base = nome_base(autor)
-        if not base:
-            resultado[autor] = ("", "SEM CORRESPONDÊNCIA", 0.0)
-            continue
-        if base in conjunto:
-            resultado[autor] = (base, "NOME", 1.0)
-            continue
-
-        termos = base.split()
-        candidatos = {
-            " ".join(c)
-            for c in por_primeiro.get(termos[0], [])
-            if min(len(c), len(termos)) >= 2
-            and (c[: len(termos)] == termos or termos[: len(c)] == c)
-        }
-        if len(candidatos) == 1:
-            alvo = candidatos.pop()
-            resultado[autor] = (
-                alvo, "PREFIXO", round(SequenceMatcher(None, base, alvo).ratio(), 2)
-            )
-            continue
-
-        # Comparação aproximada restrita a nomes com a mesma inicial,
-        # para não comparar contra o cadastro inteiro.
-        universo = [b for b in bases if b[:1] == base[:1]]
-        proximos = get_close_matches(base, universo, n=2, cutoff=0.88)
-        if proximos:
-            notas = [SequenceMatcher(None, base, p).ratio() for p in proximos]
-            if len(proximos) == 1 or notas[0] - notas[1] >= 0.04:
-                resultado[autor] = (proximos[0], "APROXIMADO", round(notas[0], 2))
-                continue
-
-        resultado[autor] = ("", "SEM CORRESPONDÊNCIA", 0.0)
-    return resultado
+    hoje = pd.Timestamp(datetime.now().date())
+    melhor = (None, pd.NaT)
+    for campo, rotulo in MARCOS.items():
+        data = _data(linha, campo)
+        if data is not None and data <= hoje and (pd.isna(melhor[1]) or data >= melhor[1]):
+            melhor = (rotulo, data)
+    return melhor
 
 
-# ---------------------------------------------------------- cruzamento
+# ------------------------------------------------------------ preparação
+
+
+def preparar(clientes: pd.DataFrame) -> pd.DataFrame:
+    """Uma linha por demanda, com fase, último marco e chave do cliente."""
+    dados = clientes.copy()
+    for campo in MARCOS:
+        if campo not in dados.columns:
+            dados[campo] = pd.NaT
+    dados["chave"] = dados["cliente"].map(nome_base)
+    registros = dados.to_dict("records")
+    dados["fase"] = [fase_da_demanda(r) for r in registros]
+    marcos = [ultimo_marco(r) for r in registros]
+    dados["ultimo_marco"] = [m[0] or "" for m in marcos]
+    dados["data_ultimo_marco"] = pd.to_datetime([m[1] for m in marcos])
+    hoje = pd.Timestamp(datetime.now().date())
+    dados["dias_desde_marco"] = (hoje - dados["data_ultimo_marco"]).dt.days.astype("Int64")
+    dados["ordem_fase"] = dados["fase"].map(FASES.index)
+    return dados
 
 
 def _juntar(serie) -> str:
-    valores = sorted({str(v).strip() for v in serie if str(v).strip()})
-    return " | ".join(valores)
+    return " | ".join(sorted({str(v).strip() for v in serie if str(v).strip()}))
 
 
 def _juntar_responsavel(serie) -> str:
@@ -185,496 +176,399 @@ def _juntar_responsavel(serie) -> str:
     return " | ".join(sorted(valores)) or SEM_RESP
 
 
+def _servicos_com_contagem(serie) -> str:
+    contagem = serie.value_counts()
+    return ", ".join(
+        f"{servico} ({qtd})" if qtd > 1 else servico for servico, qtd in contagem.items()
+    )
+
+
 def _primeiro_link(serie):
     for valor in serie:
-        if str(valor or "").strip():
+        if ui.url_bitrix(valor):
             return valor
     return ""
 
 
-def cruzar(clientes: pd.DataFrame, prazos: pd.DataFrame, de_para: pd.DataFrame):
-    hoje = pd.Timestamp(datetime.now().date())
+def por_cliente(demandas: pd.DataFrame) -> pd.DataFrame:
+    ativas = demandas[demandas["fase"] != "DESCARTADO"]
 
-    cl = clientes.copy()
-    cl["chave"] = cl["cliente"].map(nome_base)
-    cl["link_id"] = cl["link_bitrix"].map(_chave_link)
-    bases = tuple(sorted(set(cl["chave"]) - {""}))
-
-    if prazos.empty:
-        prazos = pd.DataFrame(
-            columns=["autor", "link_bitrix", "encerrado", "situacao", "data_controle",
-                     "data_evento", "conteudo", "resumo_resultados", "responsavel",
-                     "status", "prazo_fatal", "data_final", "linha_origem"]
-        )
-    pz = prazos.copy()
-    pz["link_id"] = pz["link_bitrix"].map(_chave_link)
-
-    por_link = (
-        cl[cl["link_id"] != ""].drop_duplicates("link_id").set_index("link_id")["chave"]
-    )
-    mapa_nomes = casar_nomes(
-        tuple(sorted(pz["autor"].astype(str).unique())),
-        bases,
-        tuple(de_para[["nome_prazo", "nome_cliente"]].itertuples(index=False, name=None)),
-    )
-
-    chave, metodo, nota = [], [], []
-    for link_id, autor in zip(pz["link_id"], pz["autor"].astype(str)):
-        if link_id and link_id in por_link.index:
-            chave.append(por_link[link_id]); metodo.append("LINK BITRIX"); nota.append(1.0)
-        else:
-            alvo, forma, semelhanca = mapa_nomes.get(autor, ("", "SEM CORRESPONDÊNCIA", 0))
-            # Sem correspondência mantém o próprio nome-base como chave,
-            # para o prazo continuar agrupado na lista de divergências.
-            chave.append(alvo or f"#{nome_base(autor)}")
-            metodo.append(forma); nota.append(semelhanca)
-    pz["chave"] = chave
-    pz["casou_por"] = metodo
-    pz["semelhanca"] = nota
-
-    # ------------------------------------------- agregado de prazos
-    pz["aberto"] = ~pz["encerrado"].astype(bool)
-    pz["critico"] = pz["aberto"] & pz["situacao"].isin(SITUACOES_ABERTAS_CRITICAS)
-    pz["vencido"] = pz["aberto"] & pz["situacao"].eq("VENCIDO")
-    controle = pd.to_datetime(pz["data_controle"], errors="coerce")
-    pz["proximo_fatal"] = controle.where(pz["aberto"] & (controle >= hoje))
-
-    ultimo = (
-        pz.sort_values("data_evento", na_position="first")
-        .groupby("chave").tail(1).set_index("chave")
-    )
-    agregado = pz.groupby("chave").agg(
-        prazos=("autor", "count"),
-        abertos=("aberto", "sum"),
-        criticos=("critico", "sum"),
-        vencidos=("vencido", "sum"),
-        proximo_fatal=("proximo_fatal", "min"),
-        ultima_movimentacao=("data_evento", "max"),
-        nomes_no_prazo=("autor", _juntar),
-    )
-    agregado["ultimo_conteudo"] = ultimo["conteudo"].astype(str).str.slice(0, 120)
-    agregado["ultimo_resultado"] = (
-        pz[pz["resumo_resultados"].astype(str).str.strip() != ""]
-        .sort_values("data_evento")
-        .groupby("chave")["resumo_resultados"].last()
-    )
-
-    # ------------------------------------------ agregado de clientes
-    base = cl.groupby("chave").agg(
+    base = demandas.groupby("chave").agg(
         cliente=("cliente", "first"),
         nomes_no_cadastro=("cliente", _juntar),
-        servico=("servico", _juntar),
-        status=("status", _juntar),
+        demandas=("cliente", "count"),
+        servicos=("servico", _servicos_com_contagem),
         responsavel=("responsavel", _juntar_responsavel),
-        acoes=("cliente", "count"),
+        status=("status", _juntar),
+        primeiro_contrato=("data_contrato", "min"),
+        ultimo_ajuizamento=("data_ajuizamento", "max"),
         ajuizadas=("ajuizado", "sum"),
-        encerrado=("encerrado", "all"),
-        data_contrato=("data_contrato", "min"),
-        data_ajuizamento=("data_ajuizamento", "max"),
+        descartadas=("fase", lambda s: int((s == "DESCARTADO").sum())),
         honorario_total=("honorario_total", "sum"),
-        resultado_sentenca=("resultado_sentenca", _juntar),
+        valor_ajuizado=("valor_ajuizado", "sum"),
         link_bitrix=("link_bitrix", _primeiro_link),
+        data_ultimo_marco=("data_ultimo_marco", "max"),
     )
 
-    painel = base.join(agregado, how="left")
-    for coluna in ("prazos", "abertos", "criticos", "vencidos"):
-        painel[coluna] = painel[coluna].fillna(0).astype(int)
-    painel["dias_sem_movimento"] = (
-        hoje - pd.to_datetime(painel["ultima_movimentacao"])
-    ).dt.days.astype("Int64")
-    painel["situacao"] = [_situacao(linha) for linha in painel.itertuples()]
-    painel = painel.reset_index()
+    # Fase mais avançada entre as demandas não descartadas. Cliente só
+    # com demandas descartadas fica como DESCARTADO.
+    mais_avancada = ativas.groupby("chave")["ordem_fase"].min().map(lambda i: FASES[i])
+    base["fase_mais_avancada"] = mais_avancada.reindex(base.index).fillna("DESCARTADO")
 
-    orfaos = (
-        pz[pz["casou_por"] == "SEM CORRESPONDÊNCIA"]
-        .groupby("autor")
-        .agg(
-            prazos=("autor", "count"),
-            abertos=("aberto", "sum"),
-            ultima_movimentacao=("data_evento", "max"),
-            responsavel=("responsavel", "first"),
-        )
-        .reset_index()
-        .sort_values("abertos", ascending=False)
+    abertas = ativas[~ativas["fase"].isin(["EXECUÇÃO CONCLUÍDA"])]
+    base["demandas_em_aberto"] = (
+        abertas.groupby("chave").size().reindex(base.index).fillna(0).astype(int)
     )
 
-    # Uma linha por nome do prazo: a quem ele foi ligado e como.
-    nomes_cliente = base["cliente"]
-    correspondencia = (
-        pz.groupby(["autor", "chave", "casou_por"])
-        .agg(prazos=("autor", "count"), semelhanca=("semelhanca", "max"))
-        .reset_index()
+    ultimo = (
+        demandas.dropna(subset=["data_ultimo_marco"])
+        .sort_values("data_ultimo_marco")
+        .groupby("chave").tail(1).set_index("chave")
     )
-    correspondencia["cliente"] = correspondencia["chave"].map(nomes_cliente).fillna("—")
-    correspondencia["nomes_no_cadastro"] = (
-        correspondencia["chave"].map(base["nomes_no_cadastro"]).fillna("—")
+    base["ultimo_marco"] = (
+        ultimo["ultimo_marco"] + " · " + ultimo["servico"].astype(str)
+    ).reindex(base.index).fillna("")
+    hoje = pd.Timestamp(datetime.now().date())
+    base["dias_desde_marco"] = (
+        (hoje - pd.to_datetime(base["data_ultimo_marco"])).dt.days.astype("Int64")
     )
-    correspondencia["semelhanca"] = (correspondencia["semelhanca"] * 100).round(0)
-
-    return painel, orfaos, correspondencia, pz
-
-
-def _situacao(linha) -> str:
-    if linha.vencidos > 0:
-        return "PRAZO VENCIDO"
-    if linha.encerrado and linha.abertos > 0:
-        return "ENCERRADO COM PRAZO ABERTO"
-    if linha.ajuizadas > 0 and linha.prazos == 0:
-        return "AJUIZADO SEM PRAZO NO CONTROLE"
-    if linha.ajuizadas == 0 and linha.prazos > 0 and not linha.encerrado:
-        return "PRAZO SEM AJUIZAMENTO NO CADASTRO"
-    if linha.criticos > 0:
-        return "PRAZO NOS PRÓXIMOS 7 DIAS"
-    if linha.encerrado:
-        return "ENCERRADO"
-    if linha.ajuizadas > 0:
-        return "EM ANDAMENTO"
-    return "PRÉ-AJUIZAMENTO"
+    return base.reset_index()
 
 
 # ----------------------------------------------------------------- tela
 
 
-def render(clientes: pd.DataFrame, prazos: pd.DataFrame) -> None:
+def render(clientes: pd.DataFrame) -> None:
     st.subheader("Clientes e processos")
     st.caption(
-        "Cruzamento do controle de clientes com o controle de prazos, por "
-        "cliente. Ligação pelo link do Bitrix, pela aba DE_PARA e pelo nome, "
-        "ignorando complementos como (FEDERAL), - FEDERAL ou AGIBANK 1."
+        "Visão por cliente a partir do controle de clientes. Cada linha do "
+        "controle é uma demanda; a fase vem das datas preenchidas (ajuizamento, "
+        "sentença, trânsito, faturamento, conclusão da execução)."
     )
 
     clientes = auth.aplicar_recorte(clientes)
-    prazos = auth.aplicar_recorte(prazos)
     if clientes.empty:
         st.info("Nenhum cliente disponível.")
         return
 
-    painel(clientes, prazos, modelo.carregar_de_para())
+    painel(preparar(clientes))
 
 
 @st.fragment
-def painel(clientes: pd.DataFrame, prazos: pd.DataFrame, de_para: pd.DataFrame) -> None:
+def painel(demandas: pd.DataFrame) -> None:
     regras = auth.regras_atuais()
-    base, orfaos, correspondencia, prazos_chave = cruzar(clientes, prazos, de_para)
+    financeiro = regras["ver_financeiro"]
 
     busca = st.text_input(
-        "Buscar", placeholder="Cliente, serviço, responsável...",
+        "Buscar cliente", placeholder="Nome do cliente, serviço, responsável...",
         key="cx_busca", label_visibility="collapsed",
     )
     with st.expander("Filtros", expanded=False):
         linha = st.columns(4)
         with linha[0]:
-            responsaveis = ui.multiselecao(
-                "Responsável", ui.opcoes(clientes, "responsavel"), "cx_resp"
+            servicos = ui.multiselecao(
+                "Serviço", ui.opcoes(demandas, "servico"), "cx_serv"
             )
         with linha[1]:
-            servicos = ui.multiselecao(
-                "Serviço", ui.opcoes(clientes, "servico"), "cx_serv"
+            responsaveis = ui.multiselecao(
+                "Responsável", ui.opcoes(demandas, "responsavel"), "cx_resp"
             )
         with linha[2]:
-            limite = st.number_input(
-                "Parado há mais de (dias)", min_value=15, max_value=365,
-                value=DIAS_PARADO_PADRAO, step=15, key="cx_parado",
+            status = ui.multiselecao(
+                "Status (controle)", ui.opcoes(demandas, "status"), "cx_status"
             )
         with linha[3]:
-            ocultar_encerrados = st.toggle(
-                "Ocultar encerrados", value=True, key="cx_ocultar"
+            incluir_descartadas = st.toggle(
+                "Incluir descartadas", value=False, key="cx_descartadas"
             )
+        filtradas = ui.filtro_periodo(
+            demandas, "data_contrato", "Contrato entre", "cx_periodo"
+        )
 
-    base = base.copy()
-    parado = base["situacao"].eq("EM ANDAMENTO") & (
-        base["dias_sem_movimento"].fillna(0) > limite
-    )
-    base.loc[parado, "situacao"] = "PARADO"
-
-    filtrados = base
-    if responsaveis:
-        filtrados = filtrados[
-            filtrados["responsavel"].apply(lambda v: any(r in v for r in responsaveis))
-        ]
-    if servicos:
-        filtrados = filtrados[
-            filtrados["servico"].apply(lambda v: any(s in v for s in servicos))
-        ]
-    if ocultar_encerrados:
-        filtrados = filtrados[filtrados["situacao"] != "ENCERRADO"]
-    filtrados = ui.busca_texto(
-        filtrados,
-        ["cliente", "nomes_no_cadastro", "nomes_no_prazo", "servico", "responsavel",
-         "status"],
-        busca,
+    filtradas = ui.aplicar_multiselecao(filtradas, "servico", servicos)
+    filtradas = ui.aplicar_multiselecao(filtradas, "responsavel", responsaveis)
+    filtradas = ui.aplicar_multiselecao(filtradas, "status", status)
+    if not incluir_descartadas:
+        filtradas = filtradas[filtradas["fase"] != "DESCARTADO"]
+    filtradas = ui.busca_texto(
+        filtradas, ["cliente", "servico", "responsavel", "status", "diagnostico"], busca
     )
 
-    situacoes = [s for s in CORES if s in set(filtrados["situacao"])]
+    fases = [f for f in FASES if f in set(filtradas["fase"])]
     escolha = st.segmented_control(
-        "Situação", ["Todas"] + situacoes, default="Todas", key="cx_situacao",
+        "Fase", ["Todas"] + fases, default="Todas", key="cx_fase",
         label_visibility="collapsed",
     )
-    # Tudo daqui para baixo usa o recorte da situação escolhida:
-    # cartões, pizza, tabela por responsável e lista de clientes.
-    visao = filtrados if escolha in (None, "Todas") else filtrados[
-        filtrados["situacao"] == escolha
-    ]
-    ui.resumo_filtro(len(base), len(visao))
+    if escolha not in (None, "Todas"):
+        filtradas = filtradas[filtradas["fase"] == escolha]
+
+    if filtradas.empty:
+        st.info("Nenhuma demanda nos filtros atuais.")
+        return
+
+    clientes = por_cliente(filtradas)
+    st.caption(
+        f"{len(clientes)} cliente(s) · {len(filtradas)} demanda(s) no recorte, "
+        f"de {demandas['chave'].nunique()} cliente(s) e {len(demandas)} demanda(s) "
+        "no controle."
+    )
 
     colunas = st.columns(5)
-    ui.cartao(colunas[0], "Clientes", len(visao))
-    ui.cartao(colunas[1], "Com processo andando", int((visao["ajuizadas"] > 0).sum()))
-    ui.cartao(colunas[2], "Prazo vencido",
-              int((visao["situacao"] == "PRAZO VENCIDO").sum()))
-    ui.cartao(colunas[3], "Ajuizado sem prazo",
-              int((visao["situacao"] == "AJUIZADO SEM PRAZO NO CONTROLE").sum()),
-              "Cadastro diz que foi ajuizado, mas nenhum prazo foi ligado ao "
-              "cliente. Ou falta lançar o prazo, ou o nome não casou (veja a "
-              "lista de prazos sem correspondência).")
-    ui.cartao(colunas[4], f"Parados +{limite} dias",
-              int((visao["situacao"] == "PARADO").sum()),
-              "Ajuizados sem nenhum evento no controle de prazos no período.")
+    ui.cartao(colunas[0], "Clientes", len(clientes))
+    ui.cartao(colunas[1], "Demandas", len(filtradas))
+    ui.cartao(
+        colunas[2], "Clientes com 2+ demandas", int((clientes["demandas"] > 1).sum()),
+        "Clientes com mais de uma linha no controle, no recorte atual.",
+    )
+    ui.cartao(colunas[3], "Demandas ajuizadas", int(filtradas["ajuizado"].sum()))
+    if financeiro:
+        ui.cartao(
+            colunas[4], "Honorários previstos",
+            ui.moeda_cheia(filtradas["honorario_total"].sum(), True),
+        )
+    else:
+        ui.cartao(
+            colunas[4], "Com sentença",
+            int(filtradas["fase"].isin(FASES[:4]).sum()),
+        )
 
-    esquerda, direita = st.columns([1, 1.3])
+    _resumos(filtradas, financeiro)
+    _lista_de_clientes(clientes, financeiro)
+    _historico(demandas, clientes, financeiro)
+
+
+def _resumos(filtradas: pd.DataFrame, financeiro: bool) -> None:
+    esquerda, direita = st.columns([1, 1.4])
     with esquerda:
-        st.markdown("#### Situação da carteira")
-        resumo = visao["situacao"].value_counts().reset_index()
-        resumo.columns = ["situacao", "quantidade"]
-        if resumo.empty:
-            st.info("Sem clientes no recorte.")
-        else:
-            figura = px.pie(
-                resumo, names="situacao", values="quantidade",
-                color="situacao", color_discrete_map=CORES, hole=0.35,
-            )
-            figura.update_traces(textinfo="value", sort=False)
-            figura.update_layout(
-                height=340, margin=dict(t=10, b=10, l=10, r=10),
-                legend=dict(font=dict(size=11)),
-            )
-            st.plotly_chart(figura, width="stretch", key="cx_pizza")
+        st.markdown("#### Demandas por fase")
+        contagem = filtradas["fase"].value_counts().reindex(FASES).dropna().reset_index()
+        contagem.columns = ["fase", "demandas"]
+        figura = px.pie(
+            contagem, names="fase", values="demandas", color="fase",
+            color_discrete_map=CORES_FASE, hole=0.35,
+        )
+        figura.update_traces(textinfo="value", sort=False)
+        figura.update_layout(height=320, margin=dict(t=10, b=10, l=10, r=10))
+        st.plotly_chart(figura, width="stretch", key="cx_pizza_fase")
+
     with direita:
-        st.markdown("#### Por responsável")
-        responsavel = (
-            visao.assign(
-                vencido=visao["situacao"].eq("PRAZO VENCIDO"),
-                sem_prazo=visao["situacao"].eq("AJUIZADO SEM PRAZO NO CONTROLE"),
-                parado_=visao["situacao"].eq("PARADO"),
-                ajuizado_=visao["ajuizadas"] > 0,
-            )
-            .groupby("responsavel")
+        st.markdown("#### Por serviço")
+        tabela = filtradas.assign(
+            sentenciada=filtradas["fase"].isin(FASES[:4]),
+            procedente=filtradas["resultado_sentenca"].isin(
+                ["PROCEDENTE", "PARCIALMENTE PROCEDENTE"]
+            ),
+        )
+        por_servico = (
+            tabela.groupby("servico")
             .agg(
-                clientes=("cliente", "count"),
-                ajuizados=("ajuizado_", "sum"),
-                abertos=("abertos", "sum"),
-                vencido=("vencido", "sum"),
-                sem_prazo=("sem_prazo", "sum"),
-                parado=("parado_", "sum"),
+                clientes=("chave", "nunique"),
+                demandas=("cliente", "count"),
+                ajuizadas=("ajuizado", "sum"),
+                sentenciadas=("sentenciada", "sum"),
+                procedentes=("procedente", "sum"),
+                honorario_total=("honorario_total", "sum"),
+                valor_ajuizado=("valor_ajuizado", "sum"),
             )
             .reset_index()
-            .sort_values("clientes", ascending=False)
+            .sort_values("demandas", ascending=False)
         )
+        colunas = {
+            "servico": "Serviço",
+            "clientes": "Clientes",
+            "demandas": "Demandas",
+            "ajuizadas": "Ajuizadas",
+            "sentenciadas": "Com sentença",
+            "procedentes": "Procedentes",
+        }
+        moedas = []
+        if financeiro:
+            colunas.update({
+                "valor_ajuizado": "Valor ajuizado (R$)",
+                "honorario_total": "Honorários (R$)",
+            })
+            moedas = ["valor_ajuizado", "honorario_total"]
         ui.tabela_compacta(
-            responsavel,
-            {
-                "responsavel": "Responsável",
-                "clientes": "Clientes",
-                "ajuizados": "Ajuizados",
-                "abertos": "Prazos abertos",
-                "vencido": "Vencidos",
-                "sem_prazo": "Sem prazo",
-                "parado": "Parados",
-            },
-            inteiros=["clientes", "ajuizados", "abertos", "vencido",
-                      "sem_prazo", "parado"],
+            por_servico, colunas, moedas=moedas,
+            inteiros=["clientes", "demandas", "ajuizadas", "sentenciadas",
+                      "procedentes"],
+        )
+        st.caption(
+            "Na linha de total, Clientes soma os clientes de cada serviço: quem "
+            "tem dois serviços conta duas vezes. O número de clientes únicos "
+            "está no cartão acima."
         )
 
+    st.markdown("#### Serviço × fase")
+    ui.matriz_com_total(
+        filtradas.assign(um=1), "servico", "fase", "um", "Serviço",
+        formato="inteiro",
+    )
+
+
+def _lista_de_clientes(clientes: pd.DataFrame, financeiro: bool) -> None:
     st.markdown("#### Cliente a cliente")
-    ordem = list(CORES)
-    tabela = visao.sort_values(
-        ["situacao", "proximo_fatal"],
-        key=lambda s: s.map(ordem.index) if s.name == "situacao" else s,
-        na_position="last",
+    ordenacao = st.selectbox(
+        "Ordenar por",
+        ["Mais demandas", "Nome", "Mais tempo sem marco novo", "Ajuizamento mais recente"]
+        + (["Maior honorário"] if financeiro else []),
+        key="cx_ordem",
     )
-    tabela = ui.formatar_datas(
-        tabela,
-        ["data_contrato", "data_ajuizamento", "proximo_fatal", "ultima_movimentacao"],
+    criterio = {
+        "Mais demandas": (["demandas", "cliente"], [False, True]),
+        "Nome": (["cliente"], [True]),
+        "Mais tempo sem marco novo": (["dias_desde_marco"], [False]),
+        "Ajuizamento mais recente": (["ultimo_ajuizamento"], [False]),
+        "Maior honorário": (["honorario_total"], [False]),
+    }[ordenacao]
+    lista = clientes.sort_values(criterio[0], ascending=criterio[1], na_position="last")
+    lista = ui.formatar_datas(
+        lista, ["primeiro_contrato", "ultimo_ajuizamento", "data_ultimo_marco"]
     )
-    colunas_tabela = {
+    colunas = {
         "link_bitrix": "Bitrix",
         "cliente": "Cliente",
-        "situacao": "Situação",
-        "servico": "Serviço",
-        "status": "Status (clientes)",
+        "demandas": "Demandas",
+        "servicos": "Serviços",
+        "fase_mais_avancada": "Fase mais avançada",
+        "demandas_em_aberto": "Em aberto",
         "responsavel": "Responsável",
-        "acoes": "Linhas no cadastro",
-        "data_ajuizamento": "Ajuizamento",
-        "prazos": "Prazos",
-        "abertos": "Abertos",
-        "proximo_fatal": "Próximo fatal",
-        "ultima_movimentacao": "Última movimentação",
-        "dias_sem_movimento": "Dias sem movimento",
-        "ultimo_conteudo": "Último evento",
-        "ultimo_resultado": "Último resultado",
-        "resultado_sentenca": "Sentença (cadastro)",
+        "primeiro_contrato": "1º contrato",
+        "ultimo_ajuizamento": "Último ajuizamento",
+        "ultimo_marco": "Último marco",
+        "data_ultimo_marco": "Data do marco",
+        "dias_desde_marco": "Dias desde o marco",
+        "status": "Status no controle",
         "nomes_no_cadastro": "Nomes no cadastro",
-        "nomes_no_prazo": "Nomes nos prazos",
     }
-    if regras["ver_financeiro"]:
-        tabela = ui.formatar_moedas(tabela, ["honorario_total"])
-        colunas_tabela["honorario_total"] = "Honorários previstos"
-    ui.tabela(tabela, colunas_tabela, "Nenhum cliente na situação escolhida.")
-    if not visao.empty:
-        extra = (
-            f' · Honorários previstos {ui.moeda_cheia(visao["honorario_total"].sum(), True)}'
-            if regras["ver_financeiro"] else ""
-        )
-        st.markdown(
-            f'<div class="linha-total">TOTAL · {len(visao)} cliente(s) · '
-            f'{int(visao["prazos"].sum())} prazo(s), {int(visao["abertos"].sum())} '
-            f'aberto(s){extra}</div>',
-            unsafe_allow_html=True,
-        )
+    if financeiro:
+        lista = ui.formatar_moedas(lista, ["honorario_total", "valor_ajuizado"])
+        colunas["honorario_total"] = "Honorários previstos"
+        colunas["valor_ajuizado"] = "Valor ajuizado"
+    ui.tabela(lista, colunas, "Nenhum cliente no recorte.")
 
+    extra = (
+        f" · Honorários previstos {ui.moeda_cheia(clientes['honorario_total'].sum(), True)}"
+        f" · Valor ajuizado {ui.moeda_cheia(clientes['valor_ajuizado'].sum(), True)}"
+        if financeiro else ""
+    )
+    st.markdown(
+        f'<div class="linha-total">TOTAL · {len(clientes)} cliente(s) · '
+        f'{int(clientes["demandas"].sum())} demanda(s){extra}</div>',
+        unsafe_allow_html=True,
+    )
     st.download_button(
-        "Exportar CSV do cruzamento",
-        visao.to_csv(index=False, sep=";").encode("utf-8-sig"),
-        file_name="clientes_e_processos.csv",
+        "Exportar CSV por cliente",
+        clientes.drop(columns=["chave"]).to_csv(index=False, sep=";").encode("utf-8-sig"),
+        file_name="clientes_por_cliente.csv",
         mime="text/csv",
     )
 
-    _historico(visao, clientes, prazos_chave)
-    _conferencia(correspondencia, orfaos)
 
-
-def _historico(visao, clientes, prazos_chave) -> None:
-    st.markdown("#### Histórico de um cliente")
-    opcoes = visao.sort_values("cliente")[["chave", "cliente"]]
-    rotulos = dict(zip(opcoes["chave"], opcoes["cliente"]))
+def _historico(demandas: pd.DataFrame, clientes: pd.DataFrame, financeiro: bool) -> None:
+    st.markdown("#### Histórico do cliente")
+    rotulos = dict(
+        zip(clientes.sort_values("cliente")["chave"],
+            clientes.sort_values("cliente")["cliente"])
+    )
     escolhido = st.selectbox(
         "Cliente", list(rotulos), format_func=lambda c: rotulos.get(c, c),
-        index=None, placeholder="Escolha um cliente",
+        index=None, placeholder="Escolha um cliente para ver o histórico completo",
         key="cx_cliente", label_visibility="collapsed",
     )
     if not escolhido:
         return
 
-    do_cliente = clientes[clientes["cliente"].map(nome_base) == escolhido]
-    eventos = prazos_chave[prazos_chave["chave"] == escolhido].sort_values(
-        "data_evento", ascending=False, na_position="last"
+    # O histórico usa todas as demandas do cliente, inclusive as que os
+    # filtros acima esconderiam: é a ficha completa.
+    do_cliente = demandas[demandas["chave"] == escolhido].sort_values(
+        "data_contrato", na_position="last"
     )
+    nomes = sorted(do_cliente["cliente"].unique())
 
-    # Um botão por negócio do Bitrix encontrado no controle de clientes.
-    links = (
-        do_cliente.assign(url=do_cliente["link_bitrix"].map(ui.url_bitrix))
-        .dropna(subset=["url"])
-        .drop_duplicates("url")
+    colunas = st.columns(4)
+    ui.cartao(colunas[0], "Demandas", len(do_cliente))
+    ui.cartao(colunas[1], "Ajuizadas", int(do_cliente["ajuizado"].sum()))
+    ui.cartao(
+        colunas[2], "Com sentença", int(do_cliente["fase"].isin(FASES[:4]).sum())
     )
-    if links.empty:
-        st.caption("Sem link do Bitrix no controle de clientes.")
-    else:
-        botoes = st.columns(min(len(links), 4))
-        for posicao, (_, linha) in enumerate(links.head(8).iterrows()):
+    if financeiro:
+        ui.cartao(
+            colunas[3], "Honorários previstos",
+            ui.moeda_cheia(do_cliente["honorario_total"].sum(), True),
+        )
+    if len(nomes) > 1:
+        st.caption("Nomes agrupados neste cliente: " + " · ".join(nomes))
+
+    # Botões do Bitrix, um por demanda com link.
+    com_link = do_cliente.assign(url=do_cliente["link_bitrix"].map(ui.url_bitrix))
+    com_link = com_link.dropna(subset=["url"]).drop_duplicates("url")
+    if not com_link.empty:
+        botoes = st.columns(min(len(com_link), 4))
+        for posicao, (_, linha) in enumerate(com_link.head(8).iterrows()):
             botoes[posicao % 4].link_button(
-                f"Abrir no Bitrix · {linha['servico']}", linha["url"], width="stretch"
+                f"Bitrix · {linha['servico']} · linha {linha['linha_origem']}",
+                linha["url"], width="stretch",
             )
 
-    st.caption(
-        f"{len(do_cliente)} linha(s) no controle de clientes · "
-        f"{len(eventos)} registro(s) no controle de prazos."
-    )
-    ui.tabela(
-        ui.formatar_datas(do_cliente, ["data_contrato", "data_ajuizamento",
-                                       "data_sentenca"]),
-        {
-            "link_bitrix": "Bitrix",
-            "cliente": "Nome no cadastro",
-            "servico": "Serviço",
-            "status": "Status",
-            "responsavel": "Responsável",
-            "diagnostico": "Diagnóstico",
-            "data_contrato": "Contrato",
-            "data_ajuizamento": "Ajuizamento",
-            "tribunal": "Tribunal",
-            "resultado_sentenca": "Sentença",
-            "linha_origem": "Linha",
-        },
-        "Sem linhas no cadastro.",
-    )
-    ui.tabela(
-        ui.formatar_datas(eventos, ["data_evento", "prazo_fatal", "data_final"]),
-        {
-            "data_evento": "Evento",
-            "autor": "Nome no prazo",
-            "conteudo": "Conteúdo",
-            "prazo_fatal": "Fatal",
-            "status": "Status",
-            "situacao": "Situação",
-            "responsavel": "Responsável",
-            "resumo_resultados": "Resultado",
-            "casou_por": "Ligado por",
-            "linha_origem": "Linha",
-        },
-        "Nenhum prazo ligado a este cliente.",
-    )
+    st.markdown("##### Demandas")
+    visao = ui.formatar_datas(do_cliente, list(MARCOS))
+    colunas_demanda = {
+        "link_bitrix": "Bitrix",
+        "servico": "Serviço",
+        "fase": "Fase",
+        "status": "Status no controle",
+        "responsavel": "Responsável",
+        "diagnostico": "Diagnóstico",
+        "tribunal": "Tribunal",
+        "data_contrato": "Contrato",
+        "data_ajuizamento": "Ajuizamento",
+        "liminar": "Liminar",
+        "resultado_sentenca": "Sentença",
+        "data_sentenca": "Data da sentença",
+        "data_transito": "Trânsito",
+        "data_faturamento_restituicao": "Faturamento restituição",
+        "data_conclusao_execucao": "Conclusão execução",
+        "comentario": "Comentário",
+        "linha_origem": "Linha",
+    }
+    if financeiro:
+        visao = ui.formatar_moedas(visao, ["honorario_total", "valor_ajuizado"])
+        colunas_demanda["valor_ajuizado"] = "Valor ajuizado"
+        colunas_demanda["honorario_total"] = "Honorários previstos"
+    ui.tabela(visao, colunas_demanda, "Sem demandas.")
 
-
-def _conferencia(correspondencia, orfaos) -> None:
-    st.markdown("#### Conferência do cruzamento")
-
-    contagem = correspondencia.groupby("casou_por")["prazos"].sum()
-    ordem = ["LINK BITRIX", "DE-PARA", "NOME", "PREFIXO", "APROXIMADO",
-             "SEM CORRESPONDÊNCIA"]
-    resumo = pd.DataFrame(
-        {"forma": [f for f in ordem if f in contagem.index],
-         "registros": [contagem[f] for f in ordem if f in contagem.index]}
+    # Linha do tempo: todos os marcos de todas as demandas, em ordem.
+    eventos = do_cliente.melt(
+        id_vars=["servico", "linha_origem"],
+        value_vars=list(MARCOS),
+        var_name="campo",
+        value_name="data",
+    ).dropna(subset=["data"])
+    st.markdown("##### Linha do tempo")
+    if eventos.empty:
+        st.info("Nenhuma data de marco preenchida para este cliente.")
+        return
+    eventos["marco"] = eventos["campo"].map(MARCOS)
+    eventos["demanda"] = (
+        eventos["servico"].astype(str) + " · linha " + eventos["linha_origem"].astype(str)
     )
-    esquerda, direita = st.columns([1, 2])
-    with esquerda:
-        ui.tabela_compacta(
-            resumo,
-            {"forma": "Ligação", "registros": "Prazos"},
-            inteiros=["registros"],
-        )
-        st.caption(
-            "PREFIXO e APROXIMADO são inferência: confira ao lado. Ligação "
-            "errada ou nome que não casou se resolve na aba DE_PARA da "
-            "planilha auxiliar (colunas NOME NO PRAZO e NOME NO CLIENTE)."
-        )
-    with direita:
-        formas = st.multiselect(
-            "Mostrar ligações do tipo",
-            ordem,
-            default=["PREFIXO", "APROXIMADO"],
-            key="cx_formas",
-        )
-        recorte = correspondencia[correspondencia["casou_por"].isin(formas)]
-        ui.tabela(
-            recorte.sort_values(["casou_por", "semelhanca"]),
-            {
-                "autor": "Nome no prazo",
-                "cliente": "Ligado ao cliente",
-                "nomes_no_cadastro": "Nomes no cadastro",
-                "casou_por": "Ligação",
-                "semelhanca": "Semelhança %",
-                "prazos": "Prazos",
-            },
-            "Nenhuma ligação desse tipo.",
-        )
-        st.download_button(
-            "Exportar correspondências (CSV)",
-            correspondencia.drop(columns=["chave"]).to_csv(index=False, sep=";")
-            .encode("utf-8-sig"),
-            file_name="correspondencia_nomes.csv",
-            mime="text/csv",
-        )
+    eventos = eventos.sort_values("data")
 
-    with st.expander(f"Prazos sem cliente correspondente ({len(orfaos)} nomes)"):
-        ui.tabela_compacta(
-            ui.formatar_datas(orfaos, ["ultima_movimentacao"]),
-            {
-                "autor": "Nome no prazo",
-                "responsavel": "Responsável",
-                "prazos": "Prazos",
-                "abertos": "Abertos",
-                "ultima_movimentacao": "Última movimentação",
-            },
-            inteiros=["prazos", "abertos"],
-            vazio="Todos os prazos foram ligados a um cliente.",
-        )
+    figura = px.scatter(
+        eventos, x="data", y="demanda", color="marco", symbol="marco",
+        hover_data={"data": "|%d/%m/%Y", "marco": True, "demanda": False},
+    )
+    figura.update_traces(marker=dict(size=12))
+    figura.update_layout(
+        height=max(220, 70 * eventos["demanda"].nunique() + 120),
+        yaxis_title="", xaxis_title="", legend_title="",
+        margin=dict(t=10, b=10, l=10, r=10),
+    )
+    st.plotly_chart(figura, width="stretch", key="cx_linha_tempo")
+
+    ui.tabela_compacta(
+        ui.formatar_datas(eventos, ["data"]),
+        {"data": "Data", "marco": "Marco", "demanda": "Demanda"},
+        total=False,
+    )

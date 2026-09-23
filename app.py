@@ -29,7 +29,7 @@ import streamlit as st
 # quando o app e executado a partir de outro diretorio de trabalho.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from db import auth, conexao, modelo  # noqa: E402
+from db import auth, bitrix, conexao, modelo  # noqa: E402
 from paginas import (
     clientes,
     cruzamento,
@@ -281,7 +281,7 @@ FONTES_POR_PAGINA = {
     "Visão geral": ("prazos", "clientes"),
     "Prazos": ("prazos",),
     "Clientes": ("clientes",),
-    "Clientes e processos": ("clientes", "prazos"),
+    "Clientes e processos": ("clientes",),
     "Financeiro": ("clientes",),
     "Resultados": ("resultados",),
     "Produção": ("prazos", "logs"),
@@ -303,6 +303,8 @@ def limpar_tudo() -> None:
     for carregador in CARREGADORES.values():
         carregador.clear()
     modelo.estado_do_espelho.clear()
+    modelo.carregar_de_para.clear()
+    bitrix.limpar_cache()
 
 
 def barra_superior(usuario: dict) -> str:
@@ -418,7 +420,7 @@ def main() -> None:
     elif pagina == "Clientes":
         clientes.render(dados["clientes"])
     elif pagina == "Clientes e processos":
-        cruzamento.render(dados["clientes"], dados["prazos"])
+        cruzamento.render(dados["clientes"])
     elif pagina == "Financeiro":
         financeiro.render(dados["clientes"])
     elif pagina == "Resultados":

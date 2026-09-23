@@ -3,3 +3,4 @@ gspread>=6.1,<7
 google-auth>=2.35,<3
 pandas>=2.2,<4
 plotly>=5.24,<8
+requests>=2.31,<3
