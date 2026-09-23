@@ -45,7 +45,23 @@ EVENTOS = {
     "aguarda_fatal": "AGUARDA → fatal",
     "protocolo": "Protocolos",
 }
+# Retrabalho: fica fora dos cartões principais e tem aba própria.
+RETRABALHO = {
+    "correcao_conteudo": "Correções de conteúdo",
+    "alteracao_fatal": "Alterações de fatal",
+}
+TODOS_EVENTOS = {**EVENTOS, **RETRABALHO}
+CAMPO_CONTEUDO = "CONTEUDO DO PRAZO"
+# Edição do conteúdo até este tempo depois da inclusão é acabamento do
+# próprio lançamento (digitou, releu, ajustou), não correção de erro.
+MINUTOS_AJUSTE = 30
+# Edições da mesma pessoa na mesma linha com intervalo menor que isto
+# formam uma única sessão de trabalho, para medir o tempo gasto.
+MINUTOS_SESSAO = 10
+
 CORES_EVENTO = {
+    "Correções de conteúdo": "#C62828",
+    "Alterações de fatal": "#8E24AA",
     "Prazos novos": "#1A3762",
     "Verificações": "#4DA2DA",
     "AGUARDA → fatal": "#F7BD2E",
@@ -169,6 +185,16 @@ def extrair_eventos(logs: pd.DataFrame) -> pd.DataFrame:
         base["chave_origem"].astype(str) + "|" + base["cliente_autor"].map(normalizar_texto),
     )
 
+    # Sessão de trabalho: edições seguidas da mesma pessoa na mesma linha,
+    # sem pausa maior que MINUTOS_SESSAO. A duração vai da primeira à
+    # última edição, com piso de 1 minuto (uma edição isolada também
+    # custa tempo). É o tempo mínimo com a planilha aberta naquela linha.
+    base = base.sort_values(["editor", "chave_origem", "data_hora"])
+    pausa = base.groupby(["editor", "chave_origem"])["data_hora"].diff()
+    base["sessao"] = (pausa.isna() | (pausa > pd.Timedelta(minutes=MINUTOS_SESSAO))).cumsum()
+    duracao = base.groupby("sessao")["data_hora"].agg(lambda d: (d.max() - d.min()).total_seconds() / 60)
+    base["minutos_sessao"] = base["sessao"].map(duracao).clip(lower=1.0)
+
     tipo = base["tipo_evento"].astype(str).str.upper()
 
     abertura = (
@@ -192,13 +218,28 @@ def extrair_eventos(logs: pd.DataFrame) -> pd.DataFrame:
         & ~base["antes_n"].str.contains("PROTOCOLADO", na=False)
     )
 
+    correcao = (
+        base["campo"].eq(CAMPO_CONTEUDO)
+        & (base["antes"] != "")
+        & (base["depois_n"] != base["antes_n"])
+    )
+    data_antes = base["antes"].map(converter_data)
+    data_depois = base["depois"].map(converter_data)
+    alteracao_fatal = (
+        base["campo"].isin(CAMPOS_FATAL)
+        & data_antes.notna() & data_depois.notna()
+        & (data_antes != data_depois)
+    )
+    base["fatal_antes"] = data_antes
+    base["fatal_depois"] = data_depois
+
     partes = []
     # Uma inclusão por linha por dia. A identidade aqui é só aba + linha,
     # e não o nome do autor: o nome ainda está vazio quando a equipe
     # começa a linha pela data, e isso fazia a mesma inclusão virar duas
     # ou três. O evento LANCAMENTO_PRAZO registrado junto também cai
     # na mesma linha e no mesmo dia, então não soma de novo.
-    novos = base[abertura].assign(dia_=base["data_hora"].dt.date)
+    novos = base[abertura].assign(dia_=lambda d: d["data_hora"].dt.date)
     novos = novos.sort_values("data_hora").drop_duplicates(["chave_origem", "dia_"])
     novos["gatilho"] = np.where(
         novos["tipo_evento"].astype(str).str.upper().eq("LANCAMENTO_PRAZO"),
@@ -209,15 +250,43 @@ def extrair_eventos(logs: pd.DataFrame) -> pd.DataFrame:
     partes.append(base[aguarda].assign(evento="aguarda_fatal"))
     # Mesmo prazo protocolado duas vezes no mesmo dia (status desfeito e
     # refeito) conta uma vez.
-    protocolos = base[protocolo].assign(dia=base["data_hora"].dt.date)
+    protocolos = base[protocolo].assign(dia=lambda d: d["data_hora"].dt.date)
     partes.append(
         protocolos.drop_duplicates(["prazo", "dia"]).drop(columns="dia")
         .assign(evento="protocolo")
     )
 
+    partes.append(base[correcao].assign(evento="correcao_conteudo"))
+    partes.append(base[alteracao_fatal].assign(evento="alteracao_fatal"))
+
     eventos = pd.concat(partes, ignore_index=True)
     if eventos.empty:
         return eventos
+
+    # Quem incluiu a linha e quando: a inclusão mais recente da mesma
+    # linha antes do evento. Serve para separar autocorreção de correção
+    # feita por outra pessoa e para medir quanto tempo depois veio a
+    # correção ou a mudança de fatal.
+    inclusoes = (
+        novos[["chave_origem", "data_hora", "editor"]]
+        .rename(columns={"data_hora": "incluido_em", "editor": "incluido_por"})
+        .sort_values("incluido_em")
+    )
+    eventos = eventos.sort_values("data_hora")
+    if not inclusoes.empty:
+        eventos = pd.merge_asof(
+            eventos, inclusoes, left_on="data_hora", right_on="incluido_em",
+            by="chave_origem", direction="backward",
+        )
+    else:
+        eventos["incluido_em"] = pd.NaT
+        eventos["incluido_por"] = ""
+    eventos["minutos_apos_inclusao"] = (
+        (eventos["data_hora"] - eventos["incluido_em"]).dt.total_seconds() / 60
+    )
+    eventos["dias_corridos_fatal"] = (
+        pd.to_datetime(eventos["fatal_depois"]) - pd.to_datetime(eventos["fatal_antes"])
+    ).dt.days
 
     # Conteúdo do prazo: o último texto não vazio registrado no log para
     # aquele prazo, porque na hora da inclusão o conteúdo pode ainda
@@ -235,7 +304,7 @@ def extrair_eventos(logs: pd.DataFrame) -> pd.DataFrame:
     ]
     autor = eventos["cliente_autor"].astype(str).str.strip()
     eventos["autor_ref"] = autor.where(autor != "", eventos["depois"])
-    eventos["rotulo"] = eventos["evento"].map(EVENTOS)
+    eventos["rotulo"] = eventos["evento"].map(TODOS_EVENTOS)
     eventos["dia"] = eventos["data_hora"].dt.normalize()
     eventos["hora"] = eventos["data_hora"].dt.hour
     eventos["dia_semana"] = eventos["data_hora"].dt.dayofweek
@@ -307,17 +376,19 @@ def painel(eventos: pd.DataFrame, prazos: pd.DataFrame) -> None:
     dias_uteis = max(int(np.busday_count(inicio.date(), (fim + pd.Timedelta(days=1)).date())), 1)
     _cartoes(recorte, dias_uteis)
 
-    abas = st.tabs(["Por dia", "Controladoria", "Protocolos dos advogados",
+    abas = st.tabs(["Por dia", "Controladoria", "Retrabalho", "Protocolos dos advogados",
                     "Horários", "Audiências, sessões e perícias"])
     with abas[0]:
         _por_dia(recorte)
     with abas[1]:
         _controladoria(recorte, equipe, eventos)
     with abas[2]:
-        _protocolos(recorte)
+        _retrabalho(recorte)
     with abas[3]:
-        _horarios(recorte)
+        _protocolos(recorte)
     with abas[4]:
+        _horarios(recorte)
+    with abas[5]:
         _compromissos(recorte, prazos)
 
 
@@ -354,7 +425,8 @@ def _por_dia(recorte: pd.DataFrame) -> None:
         return
 
     diario = (
-        recorte.groupby(["dia", "rotulo"]).size().reset_index(name="quantidade")
+        recorte[recorte["evento"].isin(list(EVENTOS))]
+        .groupby(["dia", "rotulo"]).size().reset_index(name="quantidade")
     )
     figura = px.bar(
         diario, x="dia", y="quantidade", color="rotulo", barmode="group",
@@ -519,6 +591,259 @@ def _controladoria(recorte: pd.DataFrame, equipe: list, todos: pd.DataFrame) -> 
     )
 
 
+def _formatar_minutos(minutos) -> str:
+    try:
+        total = int(round(float(minutos)))
+    except (TypeError, ValueError):
+        return "—"
+    if total <= 0:
+        return "—"
+    horas, resto = divmod(total, 60)
+    return f"{horas}h{resto:02d}" if horas else f"{resto} min"
+
+
+def _faixa_fatal(dias_uteis) -> str:
+    if pd.isna(dias_uteis):
+        return "SEM DATA"
+    d = int(dias_uteis)
+    if d < 0:
+        return "ANTECIPADO"
+    if d <= 3:
+        return "+1 A 3 DIAS ÚTEIS (ajuste)"
+    if 8 <= d <= 12:
+        return "+8 A 12 DIAS ÚTEIS (5 → 15)"
+    return "OUTRA DILAÇÃO"
+
+
+def _consolidar_sessao(dados: pd.DataFrame, campos_fim: list[str]) -> pd.DataFrame:
+    """
+    Várias edições seguidas da mesma célula, na mesma sessão de trabalho,
+    são uma ocorrência só: vale o valor de antes da primeira e o de depois
+    da última. Sem isso, digitar e redigitar contava como várias correções.
+    """
+    if dados.empty:
+        return dados
+    ordenado = dados.sort_values("data_hora")
+    primeiro = ordenado.groupby(["sessao", "campo"]).head(1).set_index(["sessao", "campo"])
+    ultimo = ordenado.groupby(["sessao", "campo"]).tail(1).set_index(["sessao", "campo"])
+    for campo in campos_fim:
+        primeiro[campo] = ultimo[campo]
+    primeiro["edicoes"] = ordenado.groupby(["sessao", "campo"]).size()
+    return primeiro.reset_index()
+
+
+def _retrabalho(recorte: pd.DataFrame) -> None:
+    st.caption(
+        "Correção de conteúdo é a edição do CONTEÚDO DO PRAZO que já estava "
+        f"preenchido. Edição feita até {MINUTOS_AJUSTE} min depois da inclusão da "
+        "linha conta como ajuste do próprio lançamento, não como correção. "
+        "Alteração de fatal é a troca de uma data fatal por outra data (a saída de "
+        "AGUARDA não entra aqui)."
+    )
+
+    conteudo = _consolidar_sessao(
+        recorte[recorte["evento"] == "correcao_conteudo"], ["depois", "depois_n"]
+    )
+    if conteudo.empty:
+        conteudo = recorte.iloc[0:0].assign(edicoes=0)
+    conteudo = conteudo[conteudo["antes_n"] != conteudo["depois_n"]].copy()
+    conteudo["tipo_edicao"] = np.where(
+        conteudo["minutos_apos_inclusao"].between(0, MINUTOS_AJUSTE),
+        "AJUSTE NO LANÇAMENTO", "CORREÇÃO POSTERIOR",
+    )
+    conteudo["de_quem"] = np.where(
+        conteudo["incluido_por"].fillna("") == "", "LINHA ANTIGA (FORA DO LOG)",
+        np.where(conteudo["editor"] == conteudo["incluido_por"],
+                 "PRÓPRIO LANÇAMENTO", "LANÇAMENTO DE OUTRA PESSOA"),
+    )
+    correcoes = conteudo[conteudo["tipo_edicao"] == "CORREÇÃO POSTERIOR"]
+
+    fatal = _consolidar_sessao(
+        recorte[recorte["evento"] == "alteracao_fatal"], ["depois", "fatal_depois"]
+    )
+    if fatal.empty:
+        fatal = recorte.iloc[0:0].copy()
+    fatal = fatal[
+        pd.to_datetime(fatal["fatal_antes"]) != pd.to_datetime(fatal["fatal_depois"])
+    ].copy()
+    if not fatal.empty:
+        fatal["dias_uteis_fatal"] = np.busday_count(
+            pd.to_datetime(fatal["fatal_antes"]).dt.date.to_numpy(dtype="datetime64[D]"),
+            pd.to_datetime(fatal["fatal_depois"]).dt.date.to_numpy(dtype="datetime64[D]"),
+        )
+        fatal["faixa"] = fatal["dias_uteis_fatal"].map(_faixa_fatal)
+    else:
+        fatal["faixa"] = pd.Series(dtype=str)
+
+    # Tempo: medido pelas sessões de edição que contêm retrabalho, e
+    # estimado por minutos por ocorrência, que a própria equipe informa.
+    controles = st.columns(2)
+    with controles[0]:
+        min_correcao = st.number_input(
+            "Minutos estimados por correção de conteúdo", 1, 60, 3, key="ctl_min_corr",
+            help="Tempo médio de uma correção, incluindo reler a intimação.",
+        )
+    with controles[1]:
+        min_fatal = st.number_input(
+            "Minutos estimados por alteração de fatal", 1, 60, 5, key="ctl_min_fatal",
+            help="Tempo médio de uma alteração de fatal, incluindo falar com o advogado "
+            "e recalcular o prazo.",
+        )
+
+    retrabalho = pd.concat([correcoes, fatal], ignore_index=True)
+    medido = (
+        retrabalho.drop_duplicates("sessao")["minutos_sessao"].sum()
+        if not retrabalho.empty else 0
+    )
+    estimado = len(correcoes) * min_correcao + len(fatal) * min_fatal
+    novos = recorte[recorte["evento"] == "prazo_novo"]
+
+    colunas = st.columns(5)
+    ui.cartao(colunas[0], "Correções de conteúdo", len(correcoes),
+              f"Fora {int((conteudo['tipo_edicao'] == 'AJUSTE NO LANÇAMENTO').sum())} "
+              f"ajuste(s) feitos até {MINUTOS_AJUSTE} min após a inclusão.")
+    ui.cartao(
+        colunas[1], "Correções por 100 inclusões",
+        f"{len(correcoes) / len(novos) * 100:.1f}".replace(".", ",") if len(novos) else "—",
+        "Correções posteriores divididas pelas linhas novas do período.",
+    )
+    ui.cartao(colunas[2], "Alterações de fatal", len(fatal),
+              f"{int((fatal['faixa'] == '+8 A 12 DIAS ÚTEIS (5 → 15)').sum())} no "
+              "padrão de 5 para 15 dias.")
+    ui.cartao(colunas[3], "Tempo medido", _formatar_minutos(medido),
+              f"Soma das sessões de edição com retrabalho. Sessão é a sequência de "
+              f"edições da mesma pessoa na mesma linha sem pausa maior que "
+              f"{MINUTOS_SESSAO} min. Mede só o tempo com a planilha, não a conversa "
+              "com o advogado nem a consulta ao processo.")
+    ui.cartao(colunas[4], "Tempo estimado", _formatar_minutos(estimado),
+              "Ocorrências multiplicadas pelos minutos informados acima.")
+
+    st.markdown("#### Por pessoa")
+    pessoas = sorted(set(recorte["editor"]))
+    linhas = []
+    for pessoa in pessoas:
+        corr = correcoes[correcoes["editor"] == pessoa]
+        fat = fatal[fatal["editor"] == pessoa]
+        incl = novos[novos["editor"] == pessoa]
+        proprios = conteudo[
+            (conteudo["incluido_por"] == pessoa) & (conteudo["tipo_edicao"] == "CORREÇÃO POSTERIOR")
+        ]
+        sessoes = pd.concat([corr, fat])
+        if corr.empty and fat.empty and incl.empty:
+            continue
+        linhas.append({
+            "pessoa": pessoa,
+            "inclusoes": len(incl),
+            "correcoes": len(corr),
+            "linhas_corrigidas": proprios["chave_origem"].nunique(),
+            "taxa": len(proprios) / len(incl) * 100 if len(incl) else pd.NA,
+            "fatal": len(fat),
+            "medido": sessoes.drop_duplicates("sessao")["minutos_sessao"].sum()
+            if not sessoes.empty else 0,
+            "estimado": len(corr) * min_correcao + len(fat) * min_fatal,
+        })
+    tabela = pd.DataFrame(linhas)
+    if not tabela.empty:
+        total_medido = tabela["medido"].sum()
+        total_estimado = tabela["estimado"].sum()
+        tabela = ui.adicionar_total(
+            tabela, "pessoa", ["inclusoes", "correcoes", "linhas_corrigidas", "fatal"],
+            {"taxa": ("linhas_corrigidas", "inclusoes", 100)},
+        )
+        tabela.loc[tabela.index[-1], ["medido", "estimado"]] = [total_medido, total_estimado]
+        tabela["medido"] = tabela["medido"].map(_formatar_minutos)
+        tabela["estimado"] = tabela["estimado"].map(_formatar_minutos)
+        ui.tabela_compacta(
+            tabela,
+            {"pessoa": "Pessoa", "inclusoes": "Linhas incluídas",
+             "correcoes": "Correções que fez", "linhas_corrigidas": "Suas linhas corrigidas",
+             "taxa": "% das suas linhas", "fatal": "Alterações de fatal que fez",
+             "medido": "Tempo medido", "estimado": "Tempo estimado"},
+            inteiros=["inclusoes", "correcoes", "linhas_corrigidas", "fatal"],
+            percentuais=["taxa"],
+            total=False,
+        )
+        st.caption(
+            "\"Correções que fez\" conta quem editou. \"Suas linhas corrigidas\" "
+            "conta as linhas que a pessoa incluiu e que depois tiveram o conteúdo "
+            "corrigido, por ela ou por outra pessoa: é o indicador de erro no lançamento."
+        )
+
+    diario = retrabalho.groupby(["dia", "rotulo"]).size().reset_index(name="quantidade") \
+        if not retrabalho.empty else pd.DataFrame()
+    if not diario.empty:
+        figura = px.bar(diario, x="dia", y="quantidade", color="rotulo",
+                        color_discrete_map=CORES_EVENTO)
+        figura.update_layout(height=300, xaxis_title="", yaxis_title="Ocorrências",
+                             legend_title="", legend=dict(orientation="h", y=1.12))
+        figura.update_xaxes(tickformat="%d/%m")
+        st.plotly_chart(figura, width="stretch", key="ctl_retrabalho_dia")
+
+    st.markdown("#### Alterações de fatal")
+    if fatal.empty:
+        st.info("Nenhuma troca de data fatal no período.")
+    else:
+        esquerda, direita = st.columns(2)
+        with esquerda:
+            faixas = fatal["faixa"].value_counts().reset_index()
+            faixas.columns = ["faixa", "quantidade"]
+            ui.tabela_compacta(faixas, {"faixa": "Diferença entre o fatal antigo e o novo",
+                                        "quantidade": "Alterações"}, inteiros=["quantidade"])
+            dias_depois = (fatal["minutos_apos_inclusao"] / 1440).dropna()
+            if len(dias_depois):
+                st.caption(
+                    f"A alteração veio, em mediana, {dias_depois.median():.1f} dia(s) "
+                    "depois da inclusão da linha.".replace(".", ",", 1)
+                )
+        with direita:
+            por_adv = (
+                fatal.assign(adv=fatal["responsavel_tecnico"].astype(str).str.strip()
+                             .replace("", "SEM RESPONSÁVEL"))
+                .groupby("adv").agg(
+                    alteracoes=("prazo", "count"),
+                    padrao_5_15=("faixa", lambda f: int((f == "+8 A 12 DIAS ÚTEIS (5 → 15)").sum())),
+                ).reset_index().sort_values("alteracoes", ascending=False)
+            )
+            ui.tabela_compacta(
+                por_adv,
+                {"adv": "Responsável técnico da linha", "alteracoes": "Alterações",
+                 "padrao_5_15": "De 5 para 15"},
+                inteiros=["alteracoes", "padrao_5_15"],
+            )
+        st.dataframe(
+            fatal.sort_values("data_hora", ascending=False).assign(
+                quando=lambda d: d["data_hora"].dt.strftime("%d/%m/%Y %H:%M"),
+                antes_=lambda d: pd.to_datetime(d["fatal_antes"]).dt.strftime("%d/%m/%Y"),
+                depois_=lambda d: pd.to_datetime(d["fatal_depois"]).dt.strftime("%d/%m/%Y"),
+            )[["quando", "editor", "autor_ref", "conteudo_prazo", "antes_", "depois_",
+               "dias_uteis_fatal", "faixa", "responsavel_tecnico"]]
+            .rename(columns={"quando": "Quando", "editor": "Quem alterou",
+                             "autor_ref": "Autor", "conteudo_prazo": "Conteúdo",
+                             "antes_": "Fatal antigo", "depois_": "Fatal novo",
+                             "dias_uteis_fatal": "Dias úteis a mais", "faixa": "Faixa",
+                             "responsavel_tecnico": "Responsável técnico"}),
+            width="stretch", hide_index=True, height=300,
+        )
+
+    st.markdown("#### Correções de conteúdo")
+    if correcoes.empty:
+        st.info("Nenhuma correção de conteúdo no período.")
+    else:
+        st.dataframe(
+            correcoes.sort_values("data_hora", ascending=False).assign(
+                quando=lambda d: d["data_hora"].dt.strftime("%d/%m/%Y %H:%M"),
+                depois_de=lambda d: (d["minutos_apos_inclusao"] / 1440).map(
+                    lambda v: "—" if pd.isna(v) else f"{v:.1f} dia(s)".replace(".", ",")),
+            )[["quando", "editor", "autor_ref", "antes", "depois", "incluido_por",
+               "de_quem", "depois_de"]]
+            .rename(columns={"quando": "Quando", "editor": "Quem corrigiu",
+                             "autor_ref": "Autor", "antes": "Conteúdo antes",
+                             "depois": "Conteúdo depois", "incluido_por": "Quem incluiu",
+                             "de_quem": "Linha de", "depois_de": "Tempo após inclusão"}),
+            width="stretch", hide_index=True, height=320,
+        )
+
+
 def _protocolos(recorte: pd.DataFrame) -> None:
     protocolos = recorte[recorte["evento"] == "protocolo"]
     if protocolos.empty:
@@ -582,7 +907,8 @@ def _horarios(recorte: pd.DataFrame) -> None:
         return
 
     evento = st.segmented_control(
-        "Evento", list(EVENTOS.values()), default="Verificações", key="ctl_hora_evento",
+        "Evento", list(TODOS_EVENTOS.values()), default="Verificações",
+        key="ctl_hora_evento",
     ) or "Verificações"
     grupo = st.segmented_control(
         "Quem", ["Todos", "CONTROLADORIA", "ADVOGADOS E DEMAIS"], default="Todos",
