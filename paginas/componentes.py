@@ -108,7 +108,28 @@ def tabela(dados: pd.DataFrame, colunas: dict, vazio: str) -> None:
 
     presentes = {k: v for k, v in colunas.items() if k in dados.columns}
     visao = dados[list(presentes)].rename(columns=presentes)
-    st.dataframe(visao, width="stretch", hide_index=True)
+
+    # Link do Bitrix vira botão clicável que abre o negócio em outra aba.
+    configuracao = {}
+    if "link_bitrix" in presentes:
+        rotulo = presentes["link_bitrix"]
+        visao[rotulo] = visao[rotulo].map(url_bitrix)
+        configuracao[rotulo] = st.column_config.LinkColumn(
+            rotulo, display_text="Abrir ↗", width="small"
+        )
+    st.dataframe(
+        visao, width="stretch", hide_index=True, column_config=configuracao or None
+    )
+
+
+def url_bitrix(valor) -> str | None:
+    """Link utilizável, ou None. Link sem protocolo ganha https://."""
+    texto = str(valor or "").strip()
+    if not texto or texto.upper() in ("NAN", "NONE"):
+        return None
+    if not texto.lower().startswith(("http://", "https://")):
+        texto = "https://" + texto
+    return texto
 
 
 def formatar_datas(dados: pd.DataFrame, colunas: list[str]) -> pd.DataFrame:
@@ -226,11 +247,13 @@ def adicionar_total(
     for coluna in somar:
         if coluna in dados.columns:
             linha[coluna] = pd.to_numeric(dados[coluna], errors="coerce").sum()
-    for coluna, (numerador, denominador) in (medias or {}).items():
+    for coluna, regra in (medias or {}).items():
         if coluna in dados.columns:
+            numerador, denominador = regra[0], regra[1]
+            fator = regra[2] if len(regra) > 2 else 1
             den = linha.get(denominador)
             num = linha.get(numerador)
-            linha[coluna] = (num / den) if den and not pd.isna(den) else pd.NA
+            linha[coluna] = (num / den * fator) if den and not pd.isna(den) else pd.NA
     return pd.concat([dados, pd.DataFrame([linha])], ignore_index=True)
 
 

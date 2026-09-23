@@ -41,6 +41,7 @@ ABA_CLIENTES = "BI_CLIENTES"
 ABA_LOG = "LOG_ALTERACOES"
 ABA_BASE_IDS = "BI_BASE_IDS"
 ABA_CONTROLE = "CONTROLE_BI"
+ABA_DE_PARA = "DE_PARA"
 
 STATUS_ENCERRADOS_PRAZOS = {"PROTOCOLADO", "CONCLUIDO", "OK"}
 STATUS_ENCERRADOS_CLIENTES = {"PROTOCOLADO", "DESCARTADO", "CONCLUIDO"}
@@ -554,6 +555,36 @@ def carregar_base_ids() -> pd.DataFrame:
     colunas = [normalizar_texto(c).replace(" ", "_").lower() for c in matriz[0]]
     dados = pd.DataFrame(matriz[1:], columns=colunas)
     return dados[dados.iloc[:, 0].astype(str).str.strip() != ""].reset_index(drop=True)
+
+
+@st.cache_resource(ttl=conexao.TTL_CACHE, show_spinner=False)
+def carregar_de_para() -> pd.DataFrame:
+    """
+    Correspondência manual de nomes, opcional.
+
+    Aba DE_PARA criada à mão na planilha auxiliar, com duas colunas:
+    NOME NO PRAZO e NOME NO CLIENTE. Serve para os casos que o
+    cruzamento automático não resolve (apelido, nome de solteira,
+    grafia muito diferente). Sem a aba, o painel segue sem ela.
+    """
+    try:
+        matriz = conexao.ler_aba(conexao.id_planilha_auxiliar(), ABA_DE_PARA)
+    except RuntimeError:
+        return pd.DataFrame(columns=["nome_prazo", "nome_cliente"])
+
+    if len(matriz) < 2:
+        return pd.DataFrame(columns=["nome_prazo", "nome_cliente"])
+
+    mapa = mapa_cabecalhos(matriz[0])
+    registros = []
+    for linha in matriz[1:]:
+        prazo = valor_por_cabecalho(linha, mapa, ["NOME NO PRAZO", "PRAZO", "AUTOR"])
+        cliente = valor_por_cabecalho(linha, mapa, ["NOME NO CLIENTE", "CLIENTE"])
+        if valor_preenchido(prazo) and valor_preenchido(cliente):
+            registros.append(
+                {"nome_prazo": str(prazo).strip(), "nome_cliente": str(cliente).strip()}
+            )
+    return pd.DataFrame(registros, columns=["nome_prazo", "nome_cliente"])
 
 
 # ------------------------------------------------- estado do espelho
