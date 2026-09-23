@@ -155,8 +155,108 @@ def metas(clientes: pd.DataFrame) -> None:
             "depende de contratos novos."
         )
 
+    _composicao_por_nucleo(ajuizados, pipeline, meta_anual, falta)
     _evolucao(ajuizados, meta_anual, meta_mensal, ano)
     _simulador(pipeline, falta)
+
+
+# Cor fixa por núcleo, para o mesmo serviço ter a mesma cor em qualquer
+# gráfico. Núcleo novo que apareça na planilha recebe cor da sequência.
+CORES_NUCLEO = {
+    "ISENÇÃO IR": "#1A3762",
+    "BANCÁRIO": "#4DA2DA",
+    "CONTRIBUIÇÃO PREV": "#F7BD2E",
+    "PREVIDENCIÁRIO": "#2E7D32",
+    "DIVERSOS": "#C1B7AD",
+    "FALTA PARA A META": "#E3E9F0",
+}
+
+
+def _composicao_por_nucleo(ajuizados, pipeline, meta_anual, falta) -> None:
+    """
+    Quanto cada núcleo (serviço) já entregou da meta do ano.
+
+    A pizza tem a meta inteira como 100%: cada fatia é o realizado de
+    um núcleo e a fatia cinza é o que falta. A tabela ao lado cruza
+    isso com o pipeline do cenário escolhido acima, para mostrar de
+    qual núcleo pode vir o que falta.
+    """
+    st.markdown("#### Participação de cada núcleo na meta")
+
+    if ajuizados.empty and pipeline.empty:
+        st.info("Sem ajuizamentos nem pipeline no ano selecionado.")
+        return
+
+    quantidade = ajuizados.groupby("servico").size().rename("ajuizamentos")
+    realizado = ajuizados.groupby("servico")["honorario_total"].sum().rename("realizado")
+    parado = pipeline.groupby("servico")["honorario_total"].sum().rename("pipeline")
+    nucleos = pd.concat([quantidade, realizado, parado], axis=1).fillna(0)
+    nucleos.index.name = "servico"
+    nucleos = nucleos.reset_index().sort_values("realizado", ascending=False)
+
+    total_realizado = float(nucleos["realizado"].sum())
+    nucleos["pct_realizado"] = (
+        nucleos["realizado"] / total_realizado * 100 if total_realizado else 0.0
+    )
+    nucleos["pct_meta"] = nucleos["realizado"] / meta_anual * 100 if meta_anual else 0.0
+    nucleos["potencial"] = nucleos["realizado"] + nucleos["pipeline"]
+
+    fatias = nucleos[nucleos["realizado"] > 0][["servico", "realizado"]].copy()
+    if falta > 0:
+        fatias = pd.concat(
+            [fatias, pd.DataFrame([{"servico": "FALTA PARA A META", "realizado": falta}])],
+            ignore_index=True,
+        )
+
+    esquerda, direita = st.columns([1, 1.25])
+    with esquerda:
+        if fatias.empty:
+            st.info("Sem valor realizado no ano.")
+        else:
+            figura = px.pie(
+                fatias,
+                names="servico",
+                values="realizado",
+                color="servico",
+                color_discrete_map=CORES_NUCLEO,
+                hole=0.35,
+            )
+            figura.update_traces(
+                textinfo="percent",
+                sort=False,
+                hovertemplate="%{label}<br>R$ %{value:,.2f}<br>%{percent}<extra></extra>",
+            )
+            figura.update_layout(
+                height=360,
+                margin=dict(t=10, b=10, l=10, r=10),
+                legend=dict(orientation="h", y=-0.08),
+                separators=",.",
+            )
+            st.plotly_chart(figura, width="stretch")
+            st.caption("Base da pizza: meta anual. A fatia cinza é o que falta.")
+
+    with direita:
+        ui.tabela_compacta(
+            nucleos,
+            {
+                "servico": "Núcleo",
+                "ajuizamentos": "Ajuiz.",
+                "realizado": "Realizado (R$)",
+                "pct_realizado": "% do realizado",
+                "pct_meta": "% da meta",
+                "pipeline": "Pipeline (R$)",
+                "potencial": "Realizado + pipeline (R$)",
+            },
+            moedas=["realizado", "pipeline", "potencial"],
+            inteiros=["ajuizamentos"],
+            percentuais=["pct_realizado", "pct_meta"],
+            somar=["ajuizamentos", "realizado", "pipeline", "potencial",
+                   "pct_realizado", "pct_meta"],
+        )
+        st.caption(
+            "Pipeline: clientes com valor e sem ajuizamento, nas etapas do "
+            "cenário selecionado acima."
+        )
 
 
 def _evolucao(ajuizados, meta_anual, meta_mensal, ano) -> None:
@@ -210,20 +310,18 @@ def _evolucao(ajuizados, meta_anual, meta_mensal, ano) -> None:
     )
     st.plotly_chart(figura, width="stretch")
 
-    with st.expander("Tabela da evolução"):
-        ui.tabela(
-            ui.formatar_moedas(
-                mensal, ["honorario_total", "acumulado", "meta_acumulada"]
-            ),
+    with st.expander("Tabela da evolução", expanded=False):
+        ui.tabela_compacta(
+            mensal,
             {
                 "competencia_ajuizamento": "Mês",
-                "honorario_total": "No mês",
-                "acumulado": "Acumulado",
-                "meta_acumulada": "Meta acumulada",
+                "honorario_total": "No mês (R$)",
+                "acumulado": "Acumulado (R$)",
+                "meta_acumulada": "Meta acumulada (R$)",
             },
-            "Sem dados.",
+            moedas=["honorario_total", "acumulado", "meta_acumulada"],
+            somar=["honorario_total"],
         )
-
 
 def _simulador(pipeline: pd.DataFrame, falta: float) -> None:
     st.markdown("#### Simulador de protocolo")
@@ -310,20 +408,18 @@ def _simulador(pipeline: pd.DataFrame, falta: float) -> None:
             "os clientes selecionados."
         )
 
-    ui.tabela(
-        ui.formatar_moedas(
-            selecionados if not selecionados.empty else ordenado.head(30),
-            ["honorario_total"],
-        ),
+    ui.tabela_compacta(
+        selecionados if not selecionados.empty else ordenado.head(30),
         {
             "cliente": "Cliente",
             "servico": "Serviço",
             "status": "Status",
             "responsavel": "Responsável",
-            "honorario_total": "Honorários previstos",
+            "honorario_total": "Honorários previstos (R$)",
             "linha_origem": "Linha",
         },
-        "Sem clientes aguardando protocolo.",
+        moedas=["honorario_total"],
+        vazio="Sem clientes aguardando protocolo.",
     )
 
 
@@ -419,24 +515,20 @@ def painel(clientes: pd.DataFrame) -> None:
         por_responsavel = por_responsavel.sort_values(
             "honorario_total", ascending=False
         )
-        colunas_valor = ui.remover_colunas_vazias(
-            por_responsavel, ["carteira", "honorario_total", "media"]
-        )
-        rotulos = {
-            "responsavel": "Responsável",
-            "clientes": "Clientes",
-            "ajuizamentos": "Ajuizados",
-        }
-        nomes = {
-            "carteira": "Carteira",
-            "honorario_total": "Ajuizado",
-            "media": "Média",
-        }
-        rotulos.update({c: nomes[c] for c in colunas_valor})
-        ui.tabela(
-            ui.formatar_moedas(por_responsavel, colunas_valor),
-            rotulos,
-            "Sem dados no filtro.",
+        ui.tabela_compacta(
+            por_responsavel,
+            {
+                "responsavel": "Responsável",
+                "clientes": "Clientes",
+                "carteira": "Carteira (R$)",
+                "ajuizamentos": "Ajuizados",
+                "honorario_total": "Ajuizado (R$)",
+                "media": "Média (R$)",
+            },
+            moedas=["carteira", "honorario_total", "media"],
+            inteiros=["clientes", "ajuizamentos"],
+            somar=["clientes", "carteira", "ajuizamentos", "honorario_total"],
+            medias={"media": ("honorario_total", "ajuizamentos")},
         )
 
     with direita:
@@ -451,28 +543,28 @@ def painel(clientes: pd.DataFrame) -> None:
             .reset_index()
             .sort_values("honorario_total", ascending=False)
         )
-        ui.tabela(
-            ui.formatar_moedas(por_status, ["honorario_total"]),
+        ui.tabela_compacta(
+            por_status,
             {
                 "status": "Status",
                 "clientes": "Quantidade",
-                "honorario_total": "Previsto",
+                "honorario_total": "Previsto (R$)",
             },
-            "Sem dados no filtro.",
+            moedas=["honorario_total"],
+            inteiros=["clientes"],
         )
 
     if base.empty:
         return
 
     st.markdown("#### Honorários por mês e por serviço")
-    st.caption("Valores abreviados: mi para milhão, mil para milhar.")
-    matriz = ui.matriz_compacta(
+    st.caption("Valores em R$, sem abreviação.")
+    ui.matriz_com_total(
         base, "competencia_ajuizamento", "servico", "honorario_total", "Mês"
     )
-    st.dataframe(matriz, width="stretch", hide_index=True)
 
     st.markdown("#### Ajuizamentos por mês e por responsável")
-    matriz = ui.matriz_compacta(
+    ui.matriz_com_total(
         base,
         "competencia_ajuizamento",
         "responsavel",
@@ -480,4 +572,3 @@ def painel(clientes: pd.DataFrame) -> None:
         "Mês",
         formato="inteiro",
     )
-    st.dataframe(matriz, width="stretch", hide_index=True)

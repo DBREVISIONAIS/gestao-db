@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date
+from html import escape
 
 import pandas as pd
 import streamlit as st
@@ -165,68 +166,189 @@ def resumo_filtro(total: int, filtrado: int) -> None:
         st.caption(f"{filtrado} de {total} registro(s) após os filtros.")
 
 
-def moeda_curta(valor) -> str:
+def moeda_cheia(valor, simbolo: bool = False) -> str:
     """
-    Valor abreviado, para caber em tabela larga.
+    Valor por extenso no padrão brasileiro: 1.234.567,89.
 
-    1.234.567 vira 1,23 mi e 45.000 vira 45,0 mil. Serve só para
-    exibição em matriz: nas tabelas de conferência o valor vai cheio.
+    Sem o símbolo por padrão, porque nas tabelas-resumo o cabeçalho já
+    avisa que o valor é em reais e o "R$" em cada célula só alarga a
+    coluna. Zero e ausente viram travessão.
     """
     try:
         numero = float(valor)
     except (TypeError, ValueError):
         return "—"
-    if numero == 0:
+    if pd.isna(numero) or numero == 0:
         return "—"
-    if abs(numero) >= 1_000_000:
-        return f"{numero / 1_000_000:.2f} mi".replace(".", ",")
-    if abs(numero) >= 1_000:
-        return f"{numero / 1_000:.1f} mil".replace(".", ",")
-    return f"{numero:.0f}"
+    texto = f"{numero:,.2f}".replace(",", "@").replace(".", ",").replace("@", ".")
+    return f"R$ {texto}" if simbolo else texto
 
 
-def matriz_compacta(
+def _inteiro(valor) -> str:
+    try:
+        numero = float(valor)
+    except (TypeError, ValueError):
+        return "—"
+    if pd.isna(numero) or numero == 0:
+        return "—"
+    return f"{int(round(numero)):,}".replace(",", ".")
+
+
+def _percentual(valor) -> str:
+    try:
+        numero = float(valor)
+    except (TypeError, ValueError):
+        return "—"
+    if pd.isna(numero):
+        return "—"
+    return f"{numero:.1f}%".replace(".", ",")
+
+
+def adicionar_total(
+    dados: pd.DataFrame,
+    coluna_rotulo: str,
+    somar: list[str],
+    medias: dict | None = None,
+    rotulo: str = "TOTAL",
+) -> pd.DataFrame:
+    """
+    Acrescenta a linha de total ao final.
+
+    Soma apenas as colunas indicadas. Coluna de média não pode ser
+    somada: o total dela é recalculado como numerador sobre
+    denominador, já totalizados (medias = {coluna: (num, den)}).
+    Colunas acumuladas ficam em branco na linha de total.
+    """
+    if dados.empty:
+        return dados
+    linha = {coluna: pd.NA for coluna in dados.columns}
+    linha[coluna_rotulo] = rotulo
+    for coluna in somar:
+        if coluna in dados.columns:
+            linha[coluna] = pd.to_numeric(dados[coluna], errors="coerce").sum()
+    for coluna, (numerador, denominador) in (medias or {}).items():
+        if coluna in dados.columns:
+            den = linha.get(denominador)
+            num = linha.get(numerador)
+            linha[coluna] = (num / den) if den and not pd.isna(den) else pd.NA
+    return pd.concat([dados, pd.DataFrame([linha])], ignore_index=True)
+
+
+def tabela_compacta(
+    dados: pd.DataFrame,
+    colunas: dict,
+    moedas: list[str] | tuple = (),
+    inteiros: list[str] | tuple = (),
+    percentuais: list[str] | tuple = (),
+    total: bool = True,
+    somar: list[str] | None = None,
+    medias: dict | None = None,
+    vazio: str = "Sem dados no filtro.",
+) -> None:
+    """
+    Tabela-resumo enxuta, em HTML.
+
+    O st.dataframe estica a tabela na largura toda e abrevia pouco; para
+    resumo de poucas linhas isso espalha a informação. Aqui a tabela
+    ocupa só a largura do conteúdo, os números ficam alinhados à direita
+    com valor cheio e a última linha traz o total da coluna.
+
+    Por padrão soma moedas e inteiros. Percentuais só entram no total
+    se forem indicados em `somar` (participação soma 100%, variação não).
+    """
+    if dados is None or dados.empty:
+        st.info(vazio)
+        return
+
+    presentes = {k: v for k, v in colunas.items() if k in dados.columns}
+    base = dados[list(presentes)].copy()
+    primeira = list(presentes)[0]
+
+    if total:
+        if somar is None:
+            somar = [c for c in list(moedas) + list(inteiros) if c in base.columns]
+        base = adicionar_total(base, primeira, somar, medias)
+
+    numericas = set(moedas) | set(inteiros) | set(percentuais)
+    for coluna in base.columns:
+        if coluna in moedas:
+            base[coluna] = base[coluna].apply(moeda_cheia)
+        elif coluna in inteiros:
+            base[coluna] = base[coluna].apply(_inteiro)
+        elif coluna in percentuais:
+            base[coluna] = base[coluna].apply(_percentual)
+        else:
+            base[coluna] = base[coluna].apply(
+                lambda v: "" if (v is None or (not isinstance(v, str) and pd.isna(v)))
+                else str(v)
+            )
+
+    def classe(coluna: str) -> str:
+        nomes = []
+        if coluna in numericas:
+            nomes.append("num")
+        if str(presentes.get(coluna, coluna)).upper() == "TOTAL":
+            nomes.append("col-total")
+        return " ".join(nomes)
+
+    cabecalho = "".join(
+        f'<th class="{classe(c)}">{escape(str(presentes[c]))}</th>' for c in base.columns
+    )
+    linhas = []
+    ultima = len(base) - 1
+    for posicao, (_, registro) in enumerate(base.iterrows()):
+        celulas = "".join(
+            f'<td class="{classe(c)}">{escape(str(registro[c]))}</td>'
+            for c in base.columns
+        )
+        atributo = ' class="total"' if total and posicao == ultima else ""
+        linhas.append(f"<tr{atributo}>{celulas}</tr>")
+
+    html = (
+        '<div class="tab-db-wrap"><table class="tab-db">'
+        f"<thead><tr>{cabecalho}</tr></thead>"
+        f"<tbody>{''.join(linhas)}</tbody></table></div>"
+    )
+    st.markdown(html, unsafe_allow_html=True)
+
+
+def matriz_com_total(
     dados: pd.DataFrame,
     indice: str,
     coluna: str,
     valor: str,
     rotulo_indice: str,
     formato: str = "moeda",
-) -> pd.DataFrame:
+    aggfunc: str = "sum",
+) -> None:
     """
-    Tabela cruzada enxuta.
+    Tabela cruzada com total na última coluna e na última linha.
 
-    Colunas inteiramente zeradas saem, porque só empurram a informação
-    para fora da tela. Acrescenta uma coluna de total e, quando o
-    formato é moeda, abrevia os valores para caber sem rolagem.
+    Colunas inteiramente zeradas saem, porque só alargam a tabela.
+    Os valores vão cheios (sem abreviar em mil ou mi).
     """
     if dados.empty:
-        return pd.DataFrame()
+        st.info("Sem dados no filtro.")
+        return
 
     matriz = dados.pivot_table(
-        index=indice, columns=coluna, values=valor, aggfunc="sum", fill_value=0
+        index=indice, columns=coluna, values=valor, aggfunc=aggfunc, fill_value=0
     )
     matriz = matriz.loc[:, (matriz != 0).any(axis=0)]
     if matriz.empty:
-        return pd.DataFrame()
+        st.info("Sem dados no filtro.")
+        return
 
     matriz["TOTAL"] = matriz.sum(axis=1)
-    matriz = matriz.reset_index().rename(columns={indice: rotulo_indice})
+    matriz = matriz.reset_index()
+    matriz.columns = [str(c) for c in matriz.columns]
+    valores = [c for c in matriz.columns if c != indice]
+    rotulos = {indice: rotulo_indice, **{c: c for c in valores}}
 
     if formato == "moeda":
-        for nome in matriz.columns:
-            if nome != rotulo_indice:
-                matriz[nome] = matriz[nome].apply(moeda_curta)
+        tabela_compacta(matriz, rotulos, moedas=valores)
     else:
-        # Tudo vira texto: misturar inteiro e travessão na mesma coluna
-        # quebra a serialização da tabela.
-        for nome in matriz.columns:
-            if nome != rotulo_indice:
-                matriz[nome] = (
-                    matriz[nome].astype(int).astype(str).replace("0", "—")
-                )
-
-    return matriz
+        tabela_compacta(matriz, rotulos, inteiros=valores)
 
 
 def remover_colunas_vazias(dados: pd.DataFrame, colunas: list[str]) -> list[str]:

@@ -162,18 +162,10 @@ def painel(resultados: pd.DataFrame) -> None:
         )
 
     st.markdown("#### Resultados por responsável")
-    matriz = (
-        filtrados.pivot_table(
-            index="responsavel",
-            columns="categoria",
-            values="linha_origem",
-            aggfunc="count",
-            fill_value=0,
-        )
-        .reset_index()
-        .rename(columns={"responsavel": "Responsável"})
+    ui.matriz_com_total(
+        filtrados, "responsavel", "categoria", "linha_origem", "Responsável",
+        formato="inteiro", aggfunc="count",
     )
-    st.dataframe(matriz, width="stretch", hide_index=True)
 
     st.markdown("#### Detalhamento")
     visao = ui.formatar_datas(filtrados, ["data_evento"])

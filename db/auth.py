@@ -26,6 +26,7 @@ PAGINAS_DISPONIVEIS = (
     "Visão geral",
     "Prazos",
     "Clientes",
+    "Clientes e processos",
     "Financeiro",
     "Resultados",
     "Produção",

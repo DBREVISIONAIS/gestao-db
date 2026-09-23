@@ -128,12 +128,25 @@ def painel(clientes: pd.DataFrame) -> None:
             st.plotly_chart(figura, width="stretch")
 
     st.markdown("#### Clientes por responsável")
+    agregados = {"quantidade": ("cliente", "count"), "ajuizados": ("ajuizado", "sum")}
+    colunas_resp = {
+        "responsavel": "Responsável",
+        "quantidade": "Clientes",
+        "ajuizados": "Ajuizados",
+    }
+    moedas_resp = []
+    if regras["ver_financeiro"]:
+        agregados["honorario_total"] = ("honorario_total", "sum")
+        colunas_resp["honorario_total"] = "Honorários previstos (R$)"
+        moedas_resp = ["honorario_total"]
     por_responsavel = (
-        filtrados.groupby("responsavel").size().reset_index(name="Quantidade")
-        .sort_values("Quantidade", ascending=False)
-        .rename(columns={"responsavel": "Responsável"})
+        filtrados.groupby("responsavel").agg(**agregados).reset_index()
+        .sort_values("quantidade", ascending=False)
     )
-    st.dataframe(por_responsavel, width="stretch", hide_index=True)
+    ui.tabela_compacta(
+        por_responsavel, colunas_resp,
+        moedas=moedas_resp, inteiros=["quantidade", "ajuizados"],
+    )
 
     st.markdown("#### Detalhamento")
     visao = ui.formatar_datas(
@@ -157,6 +170,15 @@ def painel(clientes: pd.DataFrame) -> None:
         colunas_tabela["valor_ajuizado"] = "Valor ajuizado"
 
     ui.tabela(visao, colunas_tabela, "Nenhum cliente corresponde aos filtros.")
+    if regras["ver_financeiro"] and not filtrados.empty:
+        # Total fora da grade: linha de total dentro do st.dataframe
+        # entraria na ordenação quando alguém clica no cabeçalho.
+        st.markdown(
+            f'<div class="linha-total">TOTAL DO RECORTE · {len(filtrados)} cliente(s)'
+            f' · Honorários previstos {ui.moeda_cheia(filtrados["honorario_total"].sum(), True)}'
+            f' · Valor ajuizado {ui.moeda_cheia(filtrados["valor_ajuizado"].sum(), True)}</div>',
+            unsafe_allow_html=True,
+        )
 
     st.download_button(
         "Exportar CSV do recorte",

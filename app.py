@@ -32,6 +32,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from db import auth, conexao, modelo  # noqa: E402
 from paginas import (
     clientes,
+    cruzamento,
     financeiro,
     historico,
     logs,
@@ -204,6 +205,56 @@ def aplicar_identidade_visual() -> None:
             border: 1px solid #E3E9F0;
             border-radius: 6px;
         }}
+
+        /* Tabelas-resumo compactas: largura do conteúdo, número cheio
+           alinhado à direita e linha de total destacada. O !important
+           vence o estilo que o Streamlit aplica a tabelas em markdown. */
+        .tab-db-wrap {{ overflow-x: auto; margin: 2px 0 14px 0; }}
+        .tab-db {{
+            border-collapse: collapse !important;
+            width: auto !important;
+            font-size: 0.84rem !important;
+            border: 1px solid #E3E9F0 !important;
+        }}
+        .tab-db th {{
+            background: {PALETA["CINZA_FUNDO"]} !important;
+            color: {PALETA["CINZA_TEXTO"]} !important;
+            font-weight: 600 !important;
+            font-size: 0.70rem !important;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            padding: 6px 12px !important;
+            border: none !important;
+            border-bottom: 1px solid #D9E1EA !important;
+            text-align: left !important;
+            white-space: nowrap;
+        }}
+        .tab-db td {{
+            padding: 4px 12px !important;
+            border: none !important;
+            border-bottom: 1px solid #EEF2F7 !important;
+            color: {PALETA["AZUL_ESCURO"]} !important;
+            white-space: nowrap;
+        }}
+        .tab-db .num {{
+            text-align: right !important;
+            font-variant-numeric: tabular-nums;
+        }}
+        .tab-db .col-total {{ font-weight: 700; background: #F7F9FC !important; }}
+        .tab-db tr.total td {{
+            font-weight: 700 !important;
+            background: #EEF3F8 !important;
+            border-top: 2px solid {PALETA["AZUL_ESCURO"]} !important;
+        }}
+        .linha-total {{
+            font-size: 0.82rem;
+            font-weight: 700;
+            color: {PALETA["AZUL_ESCURO"]};
+            background: #EEF3F8;
+            border-top: 2px solid {PALETA["AZUL_ESCURO"]};
+            padding: 6px 12px;
+            margin: -6px 0 12px 0;
+        }}
         </style>
         """,
         unsafe_allow_html=True,
@@ -230,6 +281,7 @@ FONTES_POR_PAGINA = {
     "Visão geral": ("prazos", "clientes"),
     "Prazos": ("prazos",),
     "Clientes": ("clientes",),
+    "Clientes e processos": ("clientes", "prazos"),
     "Financeiro": ("clientes",),
     "Resultados": ("resultados",),
     "Produção": ("prazos", "logs"),
@@ -365,6 +417,8 @@ def main() -> None:
         prazos.render(dados["prazos"])
     elif pagina == "Clientes":
         clientes.render(dados["clientes"])
+    elif pagina == "Clientes e processos":
+        cruzamento.render(dados["clientes"], dados["prazos"])
     elif pagina == "Financeiro":
         financeiro.render(dados["clientes"])
     elif pagina == "Resultados":
