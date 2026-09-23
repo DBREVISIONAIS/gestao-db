@@ -30,6 +30,7 @@ PAGINAS_DISPONIVEIS = (
     "Financeiro",
     "Resultados",
     "Produção",
+    "Controladoria",
     "Logs e ciclos",
     "Histórico e auditoria",
 )

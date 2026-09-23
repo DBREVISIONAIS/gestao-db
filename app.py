@@ -32,6 +32,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from db import auth, bitrix, conexao, modelo  # noqa: E402
 from paginas import (
     clientes,
+    controladoria,
     cruzamento,
     financeiro,
     historico,
@@ -285,6 +286,7 @@ FONTES_POR_PAGINA = {
     "Financeiro": ("clientes",),
     "Resultados": ("resultados",),
     "Produção": ("prazos", "logs"),
+    "Controladoria": ("prazos", "logs"),
     "Logs e ciclos": ("logs", "clientes"),
     "Histórico e auditoria": ("logs", "ids"),
 }
@@ -425,6 +427,8 @@ def main() -> None:
         financeiro.render(dados["clientes"])
     elif pagina == "Resultados":
         resultados.render(dados["resultados"])
+    elif pagina == "Controladoria":
+        controladoria.render(dados["prazos"], dados["logs"])
     elif pagina == "Produção":
         producao.render(dados["prazos"], dados["logs"])
     elif pagina == "Logs e ciclos":
