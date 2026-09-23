@@ -9,9 +9,11 @@ Cada evento é reconhecido pela mudança de valor na célula, e não pelo
 rótulo TIPO_EVENTO, porque a mudança de célula está registrada em
 todas as versões do Apps Script:
 
-    PRAZO NOVO      primeira vez que a linha recebe AUTOR, CONTEÚDO DO
-                    PRAZO ou DATA EVENTO (célula vazia -> preenchida),
-                    ou evento LANCAMENTO_PRAZO. Conta uma vez por prazo.
+    PRAZO NOVO      célula AUTOR passa de vazia para preenchida, ou evento
+                    LANCAMENTO_PRAZO. Conta uma vez por linha por dia.
+                    Preencher DATA EVENTO ou CONTEÚDO não conta: isso
+                    acontece também ao completar prazo antigo, e contar
+                    cada campo multiplicava a mesma inclusão.
     VERIFICAÇÃO     célula VERIFICAÇÃO CONTROLADORIA recebe valor novo.
     AGUARDA->FATAL  célula FATAL sai de AGUARDA e passa a ter data.
     PROTOCOLO       STATUS passa a conter PROTOCOLADO.
@@ -33,7 +35,7 @@ import streamlit as st
 from db.normalizacao import converter_data, normalizar_texto
 from paginas import componentes as ui
 
-CAMPOS_ABERTURA = {"AUTOR", "CONTEUDO DO PRAZO", "DATA EVENTO", "CLIENTE"}
+CAMPOS_ABERTURA = {"AUTOR", "CLIENTE"}
 CAMPOS_FATAL = {"FATAL", "PRAZO FATAL", "DATA FATAL"}
 CAMPO_VERIFICACAO = "VERIFICACAO CONTROLADORIA"
 
@@ -65,6 +67,62 @@ ROTULO_COMPROMISSO = {
     "PERÍCIA": "Perícias",
     "DEMAIS PRAZOS": "Demais prazos",
 }
+
+# Audiência, sessão e perícia costumam ser lançadas em duas linhas: uma
+# para a intimação (o prazo que corre) e outra para a data do ato.
+# O papel de cada linha é inferido pelo conteúdo: menção a intimação,
+# publicação ou ciência indica a linha da intimação; o resto é a data do
+# ato. É inferência por palavra e deve ser conferida na tabela.
+TERMOS_INTIMACAO = ("INTIMA", "PUBLICA", "CIENCIA", "NOTIFICA")
+JANELA_PAR_DIAS = 7
+
+
+def papel_da_linha(texto) -> str:
+    normal = normalizar_texto(texto)
+    return "INTIMAÇÃO" if any(t in normal for t in TERMOS_INTIMACAO) else "DATA DO ATO"
+
+
+def agrupar_compromissos(novos: pd.DataFrame) -> pd.DataFrame:
+    """
+    Junta as linhas do mesmo compromisso: mesmo autor, mesmo tipo,
+    incluídas com até JANELA_PAR_DIAS dias de diferença. Devolve uma
+    linha por compromisso com a situação do lançamento.
+    """
+    base = novos[novos["compromisso"] != "DEMAIS PRAZOS"].copy()
+    if base.empty:
+        return pd.DataFrame()
+    base["autor_n"] = base["autor_ref"].map(normalizar_texto)
+    base = base.sort_values(["autor_n", "compromisso", "data_hora"])
+    salto = (
+        base.groupby(["autor_n", "compromisso"])["data_hora"].diff()
+        > pd.Timedelta(days=JANELA_PAR_DIAS)
+    )
+    base["grupo_c"] = salto.groupby([base["autor_n"], base["compromisso"]]).cumsum()
+
+    def situacao(grupo):
+        papeis = set(grupo["papel"])
+        if len(grupo) > 2:
+            return "MAIS DE 2 LINHAS"
+        if len(grupo) == 2 and papeis == {"INTIMAÇÃO", "DATA DO ATO"}:
+            return "COMPLETO"
+        if len(grupo) == 2:
+            return "2 LINHAS, MESMO PAPEL"
+        return "SÓ INTIMAÇÃO" if papeis == {"INTIMAÇÃO"} else "SÓ DATA DO ATO"
+
+    linhas = []
+    for (_, tipo, _), grupo in base.groupby(["autor_n", "compromisso", "grupo_c"]):
+        linhas.append({
+            "autor": grupo["autor_ref"].iloc[0],
+            "compromisso": tipo,
+            "linhas": len(grupo),
+            "primeira_inclusao": grupo["data_hora"].min(),
+            "dia": grupo["dia"].min(),
+            "situacao": situacao(grupo),
+            "quem": " | ".join(sorted(set(grupo["editor"]))),
+            "conteudos": " || ".join(grupo["conteudo_prazo"].astype(str)),
+        })
+    return pd.DataFrame(linhas)
+
 
 DIAS = ("Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado", "Domingo")
 PADRAO_CONTROLADORIA = ("MARIANA", "CAROL")
@@ -135,8 +193,18 @@ def extrair_eventos(logs: pd.DataFrame) -> pd.DataFrame:
     )
 
     partes = []
-    novos = base[abertura].sort_values("data_hora").drop_duplicates("prazo")
-    partes.append(novos.assign(evento="prazo_novo"))
+    # Uma inclusão por linha por dia. A identidade aqui é só aba + linha,
+    # e não o nome do autor: o nome ainda está vazio quando a equipe
+    # começa a linha pela data, e isso fazia a mesma inclusão virar duas
+    # ou três. O evento LANCAMENTO_PRAZO registrado junto também cai
+    # na mesma linha e no mesmo dia, então não soma de novo.
+    novos = base[abertura].assign(dia_=base["data_hora"].dt.date)
+    novos = novos.sort_values("data_hora").drop_duplicates(["chave_origem", "dia_"])
+    novos["gatilho"] = np.where(
+        novos["tipo_evento"].astype(str).str.upper().eq("LANCAMENTO_PRAZO"),
+        "LANCAMENTO_PRAZO", "AUTOR preenchido",
+    )
+    partes.append(novos.drop(columns="dia_").assign(evento="prazo_novo"))
     partes.append(base[verificacao].assign(evento="verificacao"))
     partes.append(base[aguarda].assign(evento="aguarda_fatal"))
     # Mesmo prazo protocolado duas vezes no mesmo dia (status desfeito e
@@ -161,6 +229,12 @@ def extrair_eventos(logs: pd.DataFrame) -> pd.DataFrame:
     )
     eventos["conteudo_prazo"] = eventos["prazo"].map(conteudo).fillna(eventos["conteudo"])
     eventos["compromisso"] = eventos["conteudo_prazo"].map(tipo_compromisso)
+    eventos["papel"] = [
+        papel_da_linha(texto) if tipo != "DEMAIS PRAZOS" else ""
+        for texto, tipo in zip(eventos["conteudo_prazo"], eventos["compromisso"])
+    ]
+    autor = eventos["cliente_autor"].astype(str).str.strip()
+    eventos["autor_ref"] = autor.where(autor != "", eventos["depois"])
     eventos["rotulo"] = eventos["evento"].map(EVENTOS)
     eventos["dia"] = eventos["data_hora"].dt.normalize()
     eventos["hora"] = eventos["data_hora"].dt.hour
@@ -256,6 +330,16 @@ def _cartoes(recorte: pd.DataFrame, dias_uteis: int) -> None:
             f"Média de {total / dias_uteis:.1f} por dia útil no período "
             f"({dias_uteis} dias úteis).".replace(".", ",", 1),
         )
+    novos = recorte[recorte["evento"] == "prazo_novo"]
+    linhas_compromisso = int((novos["compromisso"] != "DEMAIS PRAZOS").sum())
+    if linhas_compromisso:
+        distintos = len(agrupar_compromissos(novos))
+        st.caption(
+            f"Dos {len(novos)} prazos novos, {len(novos) - linhas_compromisso} são "
+            f"prazos comuns e {linhas_compromisso} são linhas de audiência, sessão ou "
+            f"perícia, que correspondem a {distintos} compromisso(s) distinto(s) "
+            "(em regra, duas linhas por compromisso: intimação e data do ato)."
+        )
     nao_identificados = int((recorte["editor"] == "NÃO IDENTIFICADO").sum())
     if nao_identificados:
         st.caption(
@@ -290,12 +374,64 @@ def _por_dia(recorte: pd.DataFrame) -> None:
         .sort_index(ascending=False)
         .reset_index()
     )
+    novos = recorte[recorte["evento"] == "prazo_novo"]
+    comuns = novos[novos["compromisso"] == "DEMAIS PRAZOS"].groupby("dia").size()
+    linhas_c = novos[novos["compromisso"] != "DEMAIS PRAZOS"].groupby("dia").size()
+    grupos = agrupar_compromissos(novos)
+    distintos = grupos.groupby("dia").size() if not grupos.empty else pd.Series(dtype=int)
+    tabela["comuns"] = tabela["dia"].map(comuns).fillna(0).astype(int)
+    tabela["linhas_compromisso"] = tabela["dia"].map(linhas_c).fillna(0).astype(int)
+    tabela["compromissos"] = tabela["dia"].map(distintos).fillna(0).astype(int)
     tabela["dia_semana"] = tabela["dia"].dt.dayofweek.map(lambda d: DIAS[d])
     tabela["dia"] = tabela["dia"].dt.strftime("%d/%m/%Y")
-    ui.tabela_compacta(
-        tabela,
-        {"dia": "Dia", "dia_semana": "", **EVENTOS},
-        inteiros=list(EVENTOS),
+    colunas = {
+        "dia": "Dia", "dia_semana": "",
+        "prazo_novo": "Linhas novas",
+        "comuns": "Prazos comuns",
+        "linhas_compromisso": "Linhas aud./sessão/perícia",
+        "compromissos": "Compromissos distintos",
+        "verificacao": EVENTOS["verificacao"],
+        "aguarda_fatal": EVENTOS["aguarda_fatal"],
+        "protocolo": EVENTOS["protocolo"],
+    }
+    ui.tabela_compacta(tabela, colunas, inteiros=[c for c in colunas if c not in ("dia", "dia_semana")])
+    st.caption(
+        "Linhas novas = prazos comuns + linhas de audiência, sessão e perícia. "
+        "Compromissos distintos junta as duas linhas do mesmo ato (intimação e data), "
+        "pelo autor e tipo, incluídas com até 7 dias de diferença; o compromisso "
+        "entra no dia da primeira linha."
+    )
+
+    # Conferência linha a linha: para bater o número com a planilha.
+    st.markdown("#### Conferir prazos novos de um dia")
+    dias = sorted(recorte.loc[recorte["evento"] == "prazo_novo", "dia"].unique(),
+                  reverse=True)
+    if not dias:
+        return
+    escolhido = st.selectbox(
+        "Dia", dias, format_func=lambda d: pd.Timestamp(d).strftime("%d/%m/%Y"),
+        key="ctl_conferir_dia",
+    )
+    lista = recorte[(recorte["evento"] == "prazo_novo") & (recorte["dia"] == escolhido)]
+    st.caption(
+        f"{len(lista)} inclusão(ões) em {pd.Timestamp(escolhido).strftime('%d/%m/%Y')}. "
+        "A linha é a da planilha no momento da edição; se linhas foram inseridas "
+        "acima depois, o número atual pode ter mudado."
+    )
+    st.dataframe(
+        lista.sort_values("data_hora")
+        .assign(
+            hora_=lambda d: d["data_hora"].dt.strftime("%H:%M"),
+            autor_=lambda d: d["cliente_autor"].astype(str).str.strip()
+            .where(d["cliente_autor"].astype(str).str.strip() != "", d["depois"]),
+        )
+        [["hora_", "editor", "linha", "autor_", "conteudo_prazo", "compromisso",
+          "papel", "gatilho"]]
+        .rename(columns={"hora_": "Hora", "editor": "Quem", "linha": "Linha",
+                         "autor_": "Autor incluído", "conteudo_prazo": "Conteúdo",
+                         "compromisso": "Tipo", "papel": "Linha de",
+                         "gatilho": "Reconhecido por"}),
+        width="stretch", hide_index=True,
     )
 
 
@@ -499,27 +635,62 @@ def _horarios(recorte: pd.DataFrame) -> None:
 
 def _compromissos(recorte: pd.DataFrame, prazos: pd.DataFrame) -> None:
     novos = recorte[recorte["evento"] == "prazo_novo"]
-    st.markdown("#### Incluídos no período, por tipo")
     st.caption(
-        "Tipo identificado pelo conteúdo do prazo: AUDIÊNCIA; SESSÃO (sessão, "
-        "pauta, julgamento virtual, sustentação oral); PERÍCIA (perícia, perito). "
-        "O restante entra em DEMAIS PRAZOS."
+        "Tipo pelo conteúdo do prazo: AUDIÊNCIA; SESSÃO (sessão, pauta, julgamento "
+        "virtual, sustentação oral); PERÍCIA (perícia, perito). Linha que menciona "
+        "intimação, publicação, ciência ou notificação é tratada como a linha da "
+        "intimação; as demais, como a linha da data do ato."
     )
-    if novos.empty:
-        st.info("Nenhum prazo novo no período.")
+    grupos = agrupar_compromissos(novos)
+    if grupos.empty:
+        st.info("Nenhuma audiência, sessão ou perícia incluída no período.")
     else:
-        contagem = (
-            novos.pivot_table(index="dia", columns="compromisso", values="prazo",
-                              aggfunc="count", fill_value=0)
-            .sort_index(ascending=False).reset_index()
+        st.markdown("#### Lançamentos do período")
+        linhas = novos[novos["compromisso"] != "DEMAIS PRAZOS"]
+        resumo = (
+            linhas.groupby("compromisso")
+            .agg(linhas=("prazo", "count"),
+                 intimacao=("papel", lambda s: int((s == "INTIMAÇÃO").sum())),
+                 ato=("papel", lambda s: int((s == "DATA DO ATO").sum())))
+            .join(grupos.groupby("compromisso").agg(
+                distintos=("autor", "count"),
+                completos=("situacao", lambda s: int((s == "COMPLETO").sum())),
+            ))
+            .reindex([t for t, _ in TIPOS_COMPROMISSO]).dropna(how="all")
+            .fillna(0).reset_index()
         )
-        contagem["dia"] = contagem["dia"].dt.strftime("%d/%m/%Y")
-        tipos = [c for c in ["AUDIÊNCIA", "SESSÃO DE JULGAMENTO", "PERÍCIA",
-                             "DEMAIS PRAZOS"] if c in contagem.columns]
+        resumo["pendentes"] = resumo["distintos"] - resumo["completos"]
+        resumo["compromisso"] = resumo["compromisso"].map(ROTULO_COMPROMISSO)
         ui.tabela_compacta(
-            contagem, {"dia": "Dia", **{t: ROTULO_COMPROMISSO[t] for t in tipos}},
-            inteiros=tipos,
+            resumo,
+            {"compromisso": "Tipo", "linhas": "Linhas", "intimacao": "Linhas de intimação",
+             "ato": "Linhas de data do ato", "distintos": "Compromissos distintos",
+             "completos": "Com as duas linhas", "pendentes": "A conferir"},
+            inteiros=["linhas", "intimacao", "ato", "distintos", "completos", "pendentes"],
         )
+
+        a_conferir = grupos[grupos["situacao"] != "COMPLETO"]
+        st.markdown(f"#### Compromissos a conferir ({len(a_conferir)})")
+        st.caption(
+            "Compromisso com uma linha só pode estar sem a outra lançada, ou ter a "
+            "outra lançada fora do período ou com o nome do autor escrito diferente. "
+            "Duas linhas com o mesmo papel indicam que o conteúdo não deixa claro qual "
+            "é a intimação."
+        )
+        if a_conferir.empty:
+            st.success("Todos os compromissos do período têm as duas linhas.")
+        else:
+            st.dataframe(
+                a_conferir.sort_values("primeira_inclusao", ascending=False)
+                .assign(quando=lambda d: d["primeira_inclusao"].dt.strftime("%d/%m/%Y %H:%M"),
+                        tipo=lambda d: d["compromisso"].map(ROTULO_COMPROMISSO))
+                [["quando", "autor", "tipo", "situacao", "linhas", "quem", "conteudos"]]
+                .rename(columns={"quando": "Incluído em", "autor": "Autor",
+                                 "tipo": "Tipo", "situacao": "Situação",
+                                 "linhas": "Linhas", "quem": "Quem lançou",
+                                 "conteudos": "Conteúdos lançados"}),
+                width="stretch", hide_index=True,
+            )
 
     st.markdown("#### Agenda: próximos 30 dias")
     if prazos.empty:
