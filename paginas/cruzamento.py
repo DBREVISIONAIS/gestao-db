@@ -282,13 +282,16 @@ def painel(demandas: pd.DataFrame) -> None:
                 "Incluir descartadas", value=False, key="cx_descartadas"
             )
         filtradas = ui.filtro_periodo(
-            demandas, "data_contrato", "Contrato entre", "cx_periodo"
+            demandas, "data_contrato", "Contrato entre", "cx_periodo",
+            sem_corte=True,
         )
 
     filtradas = ui.aplicar_multiselecao(filtradas, "servico", servicos)
     filtradas = ui.aplicar_multiselecao(filtradas, "responsavel", responsaveis)
     filtradas = ui.aplicar_multiselecao(filtradas, "status", status)
+    descartadas_fora = 0
     if not incluir_descartadas:
+        descartadas_fora = int((filtradas["fase"] == "DESCARTADO").sum())
         filtradas = filtradas[filtradas["fase"] != "DESCARTADO"]
     filtradas = ui.busca_texto(
         filtradas, ["cliente", "servico", "responsavel", "status", "diagnostico"], busca
@@ -311,6 +314,9 @@ def painel(demandas: pd.DataFrame) -> None:
         f"{len(clientes)} cliente(s) · {len(filtradas)} demanda(s) no recorte, "
         f"de {demandas['chave'].nunique()} cliente(s) e {len(demandas)} demanda(s) "
         "no controle."
+        + (f" {descartadas_fora} demanda(s) descartada(s) fora do recorte; "
+           "ligue \"Incluir descartadas\" nos filtros para vê-las."
+           if descartadas_fora else "")
     )
 
     colunas = st.columns(5)

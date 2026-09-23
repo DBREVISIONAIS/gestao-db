@@ -8,6 +8,7 @@ import streamlit as st
 
 from db import auth
 from paginas import componentes as ui
+from paginas.cruzamento import nome_base
 
 
 COLUNAS_BUSCA = ["cliente", "servico", "responsavel", "tribunal", "comentario"]
@@ -66,9 +67,27 @@ def painel(clientes: pd.DataFrame) -> None:
     filtrados = ui.busca_texto(filtrados, COLUNAS_BUSCA, busca)
 
     ui.resumo_filtro(len(clientes), len(filtrados))
+    descartadas = int(
+        filtrados["status"].astype(str).str.upper().str.contains("DESCART", na=False).sum()
+    )
+    if descartadas:
+        st.caption(
+            f"O recorte inclui {descartadas} demanda(s) descartada(s). Para "
+            "tirá-las, filtre o Status."
+        )
 
-    colunas = st.columns(5)
-    ui.cartao(colunas[0], "Clientes na carteira", len(filtrados))
+    colunas = st.columns(6)
+    ui.cartao(
+        colunas[0], "Demandas na carteira", len(filtrados),
+        "Linhas do controle de clientes. Um cliente com duas ações conta duas vezes.",
+    )
+    ui.cartao(
+        colunas[5], "Clientes únicos",
+        filtrados["cliente"].map(nome_base).nunique(),
+        "Pessoas distintas, agrupando as linhas pelo nome (ignora complementos "
+        "como (FEDERAL) ou - AGIBANK 1). É o mesmo critério da aba Clientes "
+        "e processos.",
+    )
     ui.cartao(
         colunas[1], "Protocolados",
         int((filtrados["status"].str.contains("PROTOCOLAD", na=False)).sum()),

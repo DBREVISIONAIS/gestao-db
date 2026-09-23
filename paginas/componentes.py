@@ -62,9 +62,16 @@ def aplicar_multiselecao(
 
 
 def filtro_periodo(
-    dados: pd.DataFrame, coluna: str, rotulo: str, chave: str
+    dados: pd.DataFrame, coluna: str, rotulo: str, chave: str,
+    sem_corte: bool = False,
 ) -> pd.DataFrame:
-    """Filtro por intervalo de datas. Registros sem data sao preservados."""
+    """
+    Filtro por intervalo de datas. Registros sem data sao preservados.
+
+    Por padrão começa em INICIO_PADRAO. Com sem_corte=True começa na
+    data mais antiga da base, para telas que são ficha do cliente e não
+    relatório do ano.
+    """
     if dados.empty or coluna not in dados.columns:
         return dados
 
@@ -76,7 +83,9 @@ def filtro_periodo(
     minimo = validas.min().date()
     fim_padrao = validas.max().date()
     inicio_padrao = (
-        INICIO_PADRAO if minimo <= INICIO_PADRAO <= fim_padrao else minimo
+        INICIO_PADRAO
+        if not sem_corte and minimo <= INICIO_PADRAO <= fim_padrao
+        else minimo
     )
 
     intervalo = st.date_input(
