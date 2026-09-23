@@ -377,7 +377,7 @@ def painel(eventos: pd.DataFrame, prazos: pd.DataFrame) -> None:
     _cartoes(recorte, dias_uteis)
 
     abas = st.tabs(["Por dia", "Controladoria", "Retrabalho", "Protocolos dos advogados",
-                    "Horários", "Audiências, sessões e perícias"])
+                    "Horários", "Audiências, sessões e perícias", "Resumo mensal"])
     with abas[0]:
         _por_dia(recorte)
     with abas[1]:
@@ -390,6 +390,8 @@ def painel(eventos: pd.DataFrame, prazos: pd.DataFrame) -> None:
         _horarios(recorte)
     with abas[5]:
         _compromissos(recorte, prazos)
+    with abas[6]:
+        _mensal(eventos, equipe)
 
 
 def _cartoes(recorte: pd.DataFrame, dias_uteis: int) -> None:
@@ -1053,3 +1055,218 @@ def _compromissos(recorte: pd.DataFrame, prazos: pd.DataFrame) -> None:
         "Data é o prazo fatal e, sem ele, a data final. Compromisso com FATAL "
         "em AGUARDA não tem data e não aparece aqui."
     )
+
+
+# ------------------------------------------------------------ mensal
+
+MESES_ABREV = ("jan", "fev", "mar", "abr", "mai", "jun", "jul", "ago", "set",
+               "out", "nov", "dez")
+
+
+def _rotulo_mes(periodo) -> str:
+    periodo = pd.Period(periodo, "M")
+    return f"{MESES_ABREV[periodo.month - 1]}/{periodo.year}"
+
+
+def _dias_uteis_mes(periodo, hoje: pd.Timestamp, inicio_log=None) -> int:
+    """
+    Dias úteis do mês cobertos pelo log: no mês corrente, só até hoje; no
+    primeiro mês do log, só a partir do primeiro registro. Sem esse corte
+    a média por dia útil dos meses incompletos sairia artificialmente baixa.
+    """
+    periodo = pd.Period(periodo, "M")
+    inicio = periodo.start_time.date()
+    if inicio_log is not None and pd.Period(inicio_log, "M") == periodo:
+        inicio = pd.Timestamp(inicio_log).date()
+    fim = min(periodo.end_time.normalize(), hoje).date() + timedelta(days=1)
+    return max(int(np.busday_count(inicio, fim)), 1)
+
+
+def _retrabalho_consolidado(eventos: pd.DataFrame) -> pd.DataFrame:
+    """Correções posteriores e alterações de fatal já consolidadas por sessão."""
+    conteudo = _consolidar_sessao(
+        eventos[eventos["evento"] == "correcao_conteudo"], ["depois", "depois_n"]
+    )
+    if not conteudo.empty:
+        conteudo = conteudo[
+            (conteudo["antes_n"] != conteudo["depois_n"])
+            & ~conteudo["minutos_apos_inclusao"].between(0, MINUTOS_AJUSTE)
+        ]
+    fatal = _consolidar_sessao(
+        eventos[eventos["evento"] == "alteracao_fatal"], ["depois", "fatal_depois"]
+    )
+    if not fatal.empty:
+        fatal = fatal[
+            pd.to_datetime(fatal["fatal_antes"]) != pd.to_datetime(fatal["fatal_depois"])
+        ]
+    partes = [p for p in (conteudo, fatal) if not p.empty]
+    return pd.concat(partes, ignore_index=True) if partes else eventos.iloc[0:0]
+
+
+def _mensal(eventos: pd.DataFrame, equipe: list) -> None:
+    st.caption(
+        "Todos os meses cobertos pelo log, independentemente do período escolhido "
+        "no topo. As mesmas regras das outras abas: prazo novo é uma linha por dia; "
+        "correção e alteração de fatal já consolidadas por sessão de edição."
+    )
+    hoje = pd.Timestamp(date.today())
+
+    principais = eventos[eventos["evento"].isin(list(EVENTOS))].copy()
+    retrab = _retrabalho_consolidado(eventos).copy()
+    base = pd.concat([principais, retrab], ignore_index=True)
+    if base.empty:
+        st.info("Sem eventos no log.")
+        return
+    base["mes"] = base["data_hora"].dt.to_period("M")
+
+    novos = base[base["evento"] == "prazo_novo"]
+    grupos = agrupar_compromissos(novos)
+    if not grupos.empty:
+        grupos["mes"] = pd.to_datetime(grupos["primeira_inclusao"]).dt.to_period("M")
+
+    meses = sorted(base["mes"].unique())
+    inicio_log = eventos["data_hora"].min()
+    linhas = []
+    for mes in meses:
+        doms = base[base["mes"] == mes]
+        n = doms[doms["evento"] == "prazo_novo"]
+        uteis = _dias_uteis_mes(mes, hoje, inicio_log)
+        linhas.append({
+            "mes": mes,
+            "rotulo": _rotulo_mes(mes)
+            + (" *" if pd.Period(inicio_log, "M") == mes and inicio_log.day > 1 else "")
+            + (" (em curso)" if mes == pd.Period(hoje, "M") else ""),
+            "dias_uteis": uteis,
+            "prazo_novo": len(n),
+            "comuns": int((n["compromisso"] == "DEMAIS PRAZOS").sum()),
+            "compromissos": int((grupos["mes"] == mes).sum()) if not grupos.empty else 0,
+            "verificacao": int((doms["evento"] == "verificacao").sum()),
+            "aguarda_fatal": int((doms["evento"] == "aguarda_fatal").sum()),
+            "protocolo": int((doms["evento"] == "protocolo").sum()),
+            "correcao_conteudo": int((doms["evento"] == "correcao_conteudo").sum()),
+            "alteracao_fatal": int((doms["evento"] == "alteracao_fatal").sum()),
+        })
+    tabela = pd.DataFrame(linhas)
+    tabela["media_novos"] = tabela["prazo_novo"] / tabela["dias_uteis"]
+    tabela["media_verif"] = tabela["verificacao"] / tabela["dias_uteis"]
+
+    # Resumo geral: mês corrente contra o anterior, na média por dia útil,
+    # para o mês em curso não parecer queda só por estar incompleto.
+    st.markdown("#### Resumo geral")
+    if len(tabela) >= 2:
+        atual, anterior = tabela.iloc[-1], tabela.iloc[-2]
+        colunas = st.columns(5)
+        for coluna, (campo, titulo) in zip(colunas, [
+            ("prazo_novo", "Prazos novos / dia útil"),
+            ("verificacao", "Verificações / dia útil"),
+            ("aguarda_fatal", "AGUARDA → fatal / dia útil"),
+            ("protocolo", "Protocolos / dia útil"),
+            ("correcao_conteudo", "Correções / dia útil"),
+        ]):
+            agora = atual[campo] / atual["dias_uteis"]
+            antes = anterior[campo] / anterior["dias_uteis"]
+            coluna.metric(
+                f"{titulo} · {_rotulo_mes(atual['mes'])}",
+                f"{agora:.1f}".replace(".", ","),
+                delta=f"{agora - antes:+.1f} vs {_rotulo_mes(anterior['mes'])}".replace(".", ","),
+                delta_color="inverse" if campo == "correcao_conteudo" else "normal",
+            )
+    total_novos = int(tabela["prazo_novo"].sum())
+    st.caption(
+        f"No log inteiro: {total_novos} linhas novas, "
+        f"{int(tabela['verificacao'].sum())} verificações, "
+        f"{int(tabela['protocolo'].sum())} protocolos e "
+        f"{int(tabela['correcao_conteudo'].sum())} correções de conteúdo, em "
+        f"{len(tabela)} mês(es). Mês com * começa depois do dia 1 no log: os totais "
+        "estão incompletos, mas as médias por dia útil contam só os dias cobertos. "
+        "O mês em curso vai só até hoje."
+    )
+
+    figura = px.bar(
+        tabela.melt(id_vars=["rotulo"], value_vars=["prazo_novo", "verificacao",
+                                                    "aguarda_fatal", "protocolo"],
+                    var_name="evento", value_name="quantidade")
+        .assign(evento=lambda d: d["evento"].map(EVENTOS)),
+        x="rotulo", y="quantidade", color="evento", barmode="group",
+        color_discrete_map=CORES_EVENTO,
+    )
+    figura.update_layout(height=360, xaxis_title="", yaxis_title="Por mês",
+                         legend_title="", legend=dict(orientation="h", y=1.12))
+    st.plotly_chart(figura, width="stretch", key="ctl_mensal")
+
+    st.markdown("#### Mês a mês")
+    ui.tabela_compacta(
+        tabela.sort_values("mes", ascending=False).assign(
+            media_novos=lambda d: d["media_novos"].map(lambda v: f"{v:.1f}".replace(".", ",")),
+            media_verif=lambda d: d["media_verif"].map(lambda v: f"{v:.1f}".replace(".", ",")),
+        ),
+        {
+            "rotulo": "Mês", "dias_uteis": "Dias úteis",
+            "prazo_novo": "Linhas novas", "comuns": "Prazos comuns",
+            "compromissos": "Aud./sessões/perícias", "media_novos": "Novos por dia útil",
+            "verificacao": "Verificações", "media_verif": "Verif. por dia útil",
+            "aguarda_fatal": "AGUARDA → fatal", "protocolo": "Protocolos",
+            "correcao_conteudo": "Correções", "alteracao_fatal": "Alt. de fatal",
+        },
+        inteiros=["dias_uteis", "prazo_novo", "comuns", "compromissos", "verificacao",
+                  "aguarda_fatal", "protocolo", "correcao_conteudo", "alteracao_fatal"],
+    )
+
+    st.markdown("#### Por responsável, mês a mês")
+    opcoes = {**EVENTOS, **RETRABALHO}
+    escolha = st.segmented_control(
+        "Indicador", list(opcoes.values()), default="Prazos novos", key="ctl_mensal_ind",
+    ) or "Prazos novos"
+    codigo = next(k for k, v in opcoes.items() if v == escolha)
+    medida = st.segmented_control(
+        "Mostrar", ["Total no mês", "Média por dia útil"], default="Total no mês",
+        key="ctl_mensal_medida",
+    ) or "Total no mês"
+
+    # Protocolo é atribuído ao responsável técnico da linha; os demais
+    # indicadores, a quem fez a edição.
+    recorte = base[base["evento"] == codigo].copy()
+    if codigo == "protocolo":
+        recorte["pessoa"] = (recorte["responsavel_tecnico"].astype(str).str.strip()
+                             .replace("", "SEM RESPONSÁVEL"))
+        st.caption("Protocolos por responsável técnico da linha no momento do protocolo.")
+    else:
+        recorte["pessoa"] = recorte["editor"]
+        if equipe:
+            so_equipe = st.toggle("Só a equipe da controladoria", value=codigo != "protocolo",
+                                  key="ctl_mensal_equipe")
+            if so_equipe:
+                recorte = recorte[recorte["pessoa"].isin(equipe)]
+    if recorte.empty:
+        st.info("Nenhum registro desse indicador.")
+        return
+
+    matriz = recorte.pivot_table(index="mes", columns="pessoa", values="data_hora",
+                                 aggfunc="count", fill_value=0).sort_index(ascending=False)
+    pessoas = list(matriz.columns)
+    matriz["TOTAL"] = matriz.sum(axis=1)
+    if medida == "Média por dia útil":
+        inicio_log = eventos["data_hora"].min()
+        uteis = pd.Series({m: _dias_uteis_mes(m, hoje, inicio_log) for m in matriz.index})
+        media = matriz.div(uteis, axis=0)
+        exibicao = media.map(lambda v: "—" if v == 0 else f"{v:.1f}".replace(".", ","))
+        exibicao.insert(0, "rotulo", [_rotulo_mes(m) for m in exibicao.index])
+        ui.tabela_compacta(
+            exibicao.reset_index(drop=True),
+            {"rotulo": "Mês", **{p: p for p in pessoas}, "TOTAL": "TOTAL"},
+            total=False,
+        )
+        st.caption("Média = total do mês dividido pelos dias úteis do mês (sem feriados).")
+    else:
+        matriz.insert(0, "rotulo", [_rotulo_mes(m) for m in matriz.index])
+        ui.tabela_compacta(
+            matriz.reset_index(drop=True),
+            {"rotulo": "Mês", **{p: p for p in pessoas}, "TOTAL": "TOTAL"},
+            inteiros=pessoas + ["TOTAL"],
+        )
+
+    evolucao = recorte.groupby(["mes", "pessoa"]).size().reset_index(name="quantidade")
+    evolucao["mes"] = evolucao["mes"].map(_rotulo_mes)
+    figura = px.line(evolucao, x="mes", y="quantidade", color="pessoa", markers=True)
+    figura.update_layout(height=320, xaxis_title="", yaxis_title=escolha, legend_title="")
+    st.plotly_chart(figura, width="stretch", key="ctl_mensal_pessoa")
