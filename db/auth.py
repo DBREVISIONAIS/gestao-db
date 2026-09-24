@@ -23,6 +23,7 @@ import pandas as pd
 import streamlit as st
 
 PAGINAS_DISPONIVEIS = (
+    "Início",
     "Visão geral",
     "Prazos",
     "Clientes",
@@ -114,8 +115,9 @@ def regras_do_perfil(perfil: str) -> dict:
 
     configuracao = dict(configuracao)
     paginas = configuracao.get("paginas") or list(PAGINAS_DISPONIVEIS)
+    # Início aparece para todo perfil: é só a porta de entrada, sem dados.
     return {
-        "paginas": [p for p in PAGINAS_DISPONIVEIS if p in paginas],
+        "paginas": [p for p in PAGINAS_DISPONIVEIS if p in paginas or p == "Início"],
         "somente_proprios": bool(configuracao.get("somente_proprios", False)),
         "ver_financeiro": bool(configuracao.get("ver_financeiro", True)),
         "ver_editor": bool(configuracao.get("ver_editor", True)),
@@ -147,6 +149,7 @@ def tela_de_login() -> None:
     usuario = autenticar(login, senha)
     if usuario:
         st.session_state["usuario"] = usuario
+        st.session_state["pagina_atual"] = "Início"
         st.rerun()
     else:
         st.error("Senha inválida." if unica else "Usuário ou senha inválidos.")

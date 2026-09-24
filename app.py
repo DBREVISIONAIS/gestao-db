@@ -34,6 +34,7 @@ from paginas import (
     clientes,
     controladoria,
     cruzamento,
+    inicio,
     financeiro,
     historico,
     logs,
@@ -290,6 +291,7 @@ aplicar_identidade_visual()
 # Cada pagina declara de quais fontes precisa. Evita carregar o log em
 # telas que nao o utilizam.
 FONTES_POR_PAGINA = {
+    "Início": (),
     "Visão geral": ("prazos", "clientes"),
     "Prazos": ("prazos",),
     "Clientes": ("clientes",),
@@ -338,7 +340,9 @@ def barra_superior(usuario: dict) -> str:
         pagina = st.segmented_control(
             "Painel",
             paginas,
-            default=st.session_state.get("pagina_atual") or paginas[0],
+            # Com a página já definida no estado (login, cartão do Início),
+            # passar default também gera aviso do Streamlit.
+            default=None if "pagina_atual" in st.session_state else paginas[0],
             key="pagina_atual",
             label_visibility="collapsed",
         )
@@ -419,7 +423,11 @@ def main() -> None:
     usuario = auth.usuario_logado()
     if not usuario:
         cabecalho("Painel de gestão · acesso restrito")
-        auth.tela_de_login()
+        _, centro, _ = st.columns([1, 1.2, 1])
+        with centro:
+            auth.tela_de_login()
+        st.markdown("#### Sistemas do escritório")
+        inicio.cartoes(logado=False)
         return
 
     # O cabecalho vem antes do carregamento de proposito: se a leitura
@@ -428,8 +436,12 @@ def main() -> None:
     cabecalho(f"Painel de gestão · {usuario['nome']}")
 
     pagina = barra_superior(usuario)
-    _estado_do_espelho()
 
+    if pagina == "Início":
+        inicio.render(usuario)
+        return
+
+    _estado_do_espelho()
     dados = carregar(pagina)
 
     if pagina == "Visão geral":
