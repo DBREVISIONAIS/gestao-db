@@ -351,6 +351,15 @@ def _simulador(pipeline: pd.DataFrame, falta: float) -> None:
         return
 
     ordenado = pipeline.sort_values("honorario_total", ascending=False).copy()
+    # Dias corridos desde a assinatura do contrato até hoje: quanto tempo
+    # o cliente já espera pelo protocolo. Sem data de contrato, fica vazio.
+    hoje = pd.Timestamp.today().normalize()
+    ordenado["dias_parado"] = (
+        hoje - pd.to_datetime(ordenado["data_contrato"], errors="coerce")
+    ).dt.days.astype("Int64")
+    ordenado["data_contrato_txt"] = pd.to_datetime(
+        ordenado["data_contrato"], errors="coerce"
+    ).dt.strftime("%d/%m/%Y").fillna("—")
     ordenado["rotulo"] = (
         ordenado["cliente"].astype(str)
         + " — "
@@ -408,18 +417,28 @@ def _simulador(pipeline: pd.DataFrame, falta: float) -> None:
             "os clientes selecionados."
         )
 
+    tabela = selecionados if not selecionados.empty else ordenado.head(30)
     ui.tabela_compacta(
-        selecionados if not selecionados.empty else ordenado.head(30),
+        tabela,
         {
             "cliente": "Cliente",
             "servico": "Serviço",
             "status": "Status",
             "responsavel": "Responsável",
+            "data_contrato_txt": "Contrato",
+            "dias_parado": "Dias desde o contrato",
             "honorario_total": "Honorários previstos (R$)",
             "linha_origem": "Linha",
         },
         moedas=["honorario_total"],
+        inteiros=["dias_parado"],
+        somar=["honorario_total"],
+        valores_total={"dias_parado": tabela["dias_parado"].mean()},
         vazio="Sem clientes aguardando protocolo.",
+    )
+    st.caption(
+        "Dias desde o contrato: dias corridos entre a data do contrato e hoje. "
+        "Na linha de total, a média desses dias entre os clientes listados."
     )
 
 

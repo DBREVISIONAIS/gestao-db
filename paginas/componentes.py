@@ -276,6 +276,7 @@ def tabela_compacta(
     somar: list[str] | None = None,
     medias: dict | None = None,
     vazio: str = "Sem dados no filtro.",
+    valores_total: dict | None = None,
 ) -> None:
     """
     Tabela-resumo enxuta, em HTML.
@@ -300,6 +301,11 @@ def tabela_compacta(
         if somar is None:
             somar = [c for c in list(moedas) + list(inteiros) if c in base.columns]
         base = adicionar_total(base, primeira, somar, medias)
+        # Valor pronto para a linha de total, quando não é soma nem razão
+        # (por exemplo, a média simples de uma coluna de dias).
+        for coluna, valor in (valores_total or {}).items():
+            if coluna in base.columns:
+                base.loc[base.index[-1], coluna] = valor
 
     numericas = set(moedas) | set(inteiros) | set(percentuais)
     for coluna in base.columns:

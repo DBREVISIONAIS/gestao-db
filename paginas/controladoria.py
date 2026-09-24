@@ -408,6 +408,7 @@ def painel(eventos: pd.DataFrame, prazos: pd.DataFrame) -> None:
         "Protocolos dos advogados": lambda: _protocolos(recorte),
         "Horários": lambda: _horarios(recorte),
         "Audiências, sessões e perícias": lambda: _compromissos(recorte, prazos),
+        "Médias": lambda: _medias(recorte, equipe, inicio, fim),
         "Resumo mensal": lambda: _mensal(eventos, equipe),
     }
     secao = st.segmented_control(
@@ -1078,6 +1079,157 @@ def _compromissos(recorte: pd.DataFrame, prazos: pd.DataFrame) -> None:
         "Data é o prazo fatal e, sem ele, a data final. Compromisso com FATAL "
         "em AGUARDA não tem data e não aparece aqui."
     )
+
+
+# ------------------------------------------------------------- médias
+
+
+def _medias(recorte: pd.DataFrame, equipe: list, inicio: pd.Timestamp,
+            fim: pd.Timestamp) -> None:
+    """
+    Médias do período escolhido no topo, por dia útil.
+
+    Dia útil sem nenhum registro entra como zero: sem isso, a média só
+    olharia os dias em que houve movimento e sairia inflada.
+    """
+    st.caption(
+        "Período do topo da tela. Médias por dia útil (segunda a sexta, sem "
+        "descontar feriados); dia útil sem registro conta como zero. Correções e "
+        "alterações de fatal já consolidadas por sessão de edição."
+    )
+    base = pd.concat(
+        [recorte[recorte["evento"].isin(list(EVENTOS))],
+         _retrabalho_consolidado(recorte)],
+        ignore_index=True,
+    )
+    if base.empty:
+        st.info("Nenhum evento no período.")
+        return
+
+    fim_util = min(fim, pd.Timestamp(date.today()))
+    dias = pd.bdate_range(inicio, fim_util)
+    if len(dias) == 0:
+        st.info("O período não tem dias úteis.")
+        return
+    semanas = max(len(dias) / 5, 1)
+
+    diario = (
+        base.pivot_table(index="dia", columns="evento", values="data_hora",
+                         aggfunc="count", fill_value=0)
+        .reindex(index=dias, columns=list(TODOS_EVENTOS), fill_value=0)
+    )
+
+    linhas = []
+    for codigo, rotulo in TODOS_EVENTOS.items():
+        serie = diario[codigo]
+        total = int(serie.sum())
+        maior_dia = serie.idxmax() if total else None
+        da_equipe = base[(base["evento"] == codigo) & base["editor"].isin(equipe)]
+        pessoas_ativas = da_equipe.groupby("editor")["dia"].nunique()
+        linhas.append({
+            "indicador": rotulo,
+            "total": total,
+            "media_dia": serie.mean(),
+            "mediana_dia": serie.median(),
+            "media_semana": total / semanas,
+            "maior": int(serie.max()),
+            "maior_dia": maior_dia.strftime("%d/%m") if maior_dia is not None else "—",
+            "dias_zero": int((serie == 0).sum()),
+            "por_pessoa_dia": (
+                (len(da_equipe) / pessoas_ativas.sum()) if pessoas_ativas.sum() else None
+            ),
+        })
+    tabela = pd.DataFrame(linhas)
+
+    def decimal(valor):
+        return "—" if valor is None or pd.isna(valor) else f"{valor:.1f}".replace(".", ",")
+
+    for coluna in ("media_dia", "mediana_dia", "media_semana", "por_pessoa_dia"):
+        tabela[coluna] = tabela[coluna].map(decimal)
+
+    st.markdown(f"#### Médias do período · {len(dias)} dia(s) útil(eis)")
+    ui.tabela_compacta(
+        tabela,
+        {
+            "indicador": "Indicador",
+            "total": "Total",
+            "media_dia": "Média por dia útil",
+            "mediana_dia": "Mediana por dia útil",
+            "media_semana": "Média por semana",
+            "maior": "Maior dia",
+            "maior_dia": "Data do maior dia",
+            "dias_zero": "Dias úteis sem registro",
+            "por_pessoa_dia": "Por pessoa da equipe, por dia com registro",
+        },
+        inteiros=["total", "maior", "dias_zero"],
+        total=False,
+    )
+    st.caption(
+        "Mediana: o dia típico, sem a distorção de um dia fora da curva. "
+        "\"Por pessoa da equipe\" divide o que a controladoria registrou pelos "
+        "dias em que cada pessoa registrou algo, e só considera quem está marcado "
+        "como equipe no topo."
+    )
+
+    # Média por dia da semana: mostra se segunda, por exemplo, concentra
+    # as inclusões do fim de semana.
+    st.markdown("#### Média por dia da semana")
+    por_semana = diario.copy()
+    por_semana["dia_semana"] = por_semana.index.dayofweek
+    media_semana = (
+        por_semana.groupby("dia_semana")[list(TODOS_EVENTOS)].mean()
+        .reindex(range(5)).reset_index()
+    )
+    media_semana["dia_semana"] = media_semana["dia_semana"].map(lambda d: DIAS[d])
+    for codigo in TODOS_EVENTOS:
+        media_semana[codigo] = media_semana[codigo].map(decimal)
+    ui.tabela_compacta(
+        media_semana,
+        {"dia_semana": "Dia", **TODOS_EVENTOS},
+        total=False,
+    )
+
+    # Por pessoa: média nos dias em que a pessoa trabalhou no controle.
+    st.markdown("#### Média por pessoa, por dia com registro")
+    so_equipe = st.toggle("Só a equipe da controladoria", value=bool(equipe),
+                          key="ctl_medias_equipe")
+    pessoas = base[base["editor"].isin(equipe)] if (so_equipe and equipe) else base
+    if pessoas.empty:
+        st.info("Nenhum registro para as pessoas selecionadas.")
+        return
+    dias_ativos = pessoas.groupby("editor")["dia"].nunique()
+    contagem = (
+        pessoas.pivot_table(index="editor", columns="evento", values="data_hora",
+                            aggfunc="count", fill_value=0)
+        .reindex(columns=list(TODOS_EVENTOS), fill_value=0)
+    )
+    medias = contagem.div(dias_ativos, axis=0)
+    medias = medias.map(decimal)
+    medias.insert(0, "dias", dias_ativos)
+    medias = medias.reset_index()
+    ui.tabela_compacta(
+        medias,
+        {"editor": "Pessoa", "dias": "Dias com registro", **TODOS_EVENTOS},
+        inteiros=["dias"],
+        total=False,
+    )
+    st.caption(
+        "Dias com registro: dias (inclusive fim de semana) com pelo menos um registro da pessoa no controle de "
+        "prazos. Cada média é o total do indicador dividido por esses dias."
+    )
+
+    diario_grafico = diario[["prazo_novo", "verificacao", "aguarda_fatal"]].copy()
+    diario_grafico = diario_grafico.rolling(5, min_periods=1).mean().reset_index(
+        names="dia"
+    ).melt(id_vars="dia", var_name="evento", value_name="media")
+    diario_grafico["evento"] = diario_grafico["evento"].map(TODOS_EVENTOS)
+    figura = px.line(diario_grafico, x="dia", y="media", color="evento",
+                     color_discrete_map=CORES_EVENTO)
+    figura.update_layout(height=320, xaxis_title="", legend_title="",
+                         yaxis_title="Média móvel de 5 dias úteis",
+                         legend=dict(orientation="h", y=1.12))
+    figura.update_xaxes(tickformat="%d/%m")
+    st.plotly_chart(figura, width="stretch", key="ctl_media_movel")
 
 
 # ------------------------------------------------------------ mensal
