@@ -19,8 +19,8 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-from db import auth
-from db.normalizacao import formatar_moeda
+from db import auth, modelo
+from db.normalizacao import formatar_moeda, normalizar_texto
 from paginas import componentes as ui
 
 
@@ -323,6 +323,52 @@ def _evolucao(ajuizados, meta_anual, meta_mensal, ano) -> None:
             somar=["honorario_total"],
         )
 
+def _entrada_no_status(pipeline: pd.DataFrame) -> tuple[pd.Series, object]:
+    """
+    Quando cada cliente entrou no status em que está hoje, pelo log.
+
+    Procura, no log do controle de clientes, a última mudança da coluna
+    STATUS para o valor atual daquela linha. A linha é identificada pelo
+    nome do cliente registrado no log e, na falta dele, pelo número da
+    linha. Sem registro, o status foi definido antes do início do log:
+    devolve vazio e a data do primeiro registro do log, para a tela dizer
+    "desde antes de".
+    """
+    vazio = pd.Series(pd.NaT, index=pipeline.index, dtype="datetime64[ns]")
+    try:
+        logs = modelo.carregar_logs()
+    except Exception:  # noqa: BLE001 - sem log, o simulador segue sem a coluna
+        return vazio, None
+    if logs.empty:
+        return vazio, None
+
+    inicio_log = logs["data_hora"].min()
+    aba = logs["aba_origem"].astype(str).map(normalizar_texto)
+    campo = logs["cabecalho"].astype(str).map(normalizar_texto)
+    mudancas = logs[aba.str.contains("CLIENTE", na=False) & campo.eq("STATUS")].copy()
+    if mudancas.empty:
+        return vazio, inicio_log
+
+    mudancas["status_n"] = mudancas["valor_novo"].astype(str).map(normalizar_texto)
+    mudancas["nome_n"] = mudancas["cliente_autor"].astype(str).map(normalizar_texto)
+    mudancas["linha_n"] = pd.to_numeric(mudancas["linha"], errors="coerce")
+    por_nome = mudancas[mudancas["nome_n"] != ""].groupby(["nome_n", "status_n"])["data_hora"].max()
+    por_linha = mudancas.groupby(["linha_n", "status_n"])["data_hora"].max()
+
+    datas = []
+    for _, linha in pipeline.iterrows():
+        status = normalizar_texto(linha["status"])
+        chave_nome = (normalizar_texto(linha["cliente"]), status)
+        chave_linha = (pd.to_numeric(linha.get("linha_origem"), errors="coerce"), status)
+        if chave_nome in por_nome.index:
+            datas.append(por_nome[chave_nome])
+        elif chave_linha in por_linha.index:
+            datas.append(por_linha[chave_linha])
+        else:
+            datas.append(pd.NaT)
+    return pd.Series(pd.to_datetime(datas), index=pipeline.index), inicio_log
+
+
 def _simulador(pipeline: pd.DataFrame, falta: float) -> None:
     st.markdown("#### Simulador de protocolo")
 
@@ -360,6 +406,17 @@ def _simulador(pipeline: pd.DataFrame, falta: float) -> None:
     ordenado["data_contrato_txt"] = pd.to_datetime(
         ordenado["data_contrato"], errors="coerce"
     ).dt.strftime("%d/%m/%Y").fillna("—")
+
+    entrada, inicio_log = _entrada_no_status(ordenado)
+    ordenado["dias_status"] = (hoje - entrada.dt.normalize()).dt.days.astype("Int64")
+    antes_do_log = (
+        f"antes de {pd.Timestamp(inicio_log).strftime('%d/%m/%Y')}"
+        if inicio_log is not None and pd.notna(inicio_log) else "sem registro"
+    )
+    ordenado["status_desde"] = entrada.dt.strftime("%d/%m/%Y").fillna(antes_do_log)
+    ordenado["dias_status_txt"] = ordenado["dias_status"].map(
+        lambda v: "—" if pd.isna(v) else str(int(v))
+    )
     ordenado["rotulo"] = (
         ordenado["cliente"].astype(str)
         + " — "
@@ -427,18 +484,31 @@ def _simulador(pipeline: pd.DataFrame, falta: float) -> None:
             "responsavel": "Responsável",
             "data_contrato_txt": "Contrato",
             "dias_parado": "Dias desde o contrato",
+            "status_desde": "No status atual desde",
+            "dias_status_txt": "Dias no status atual",
             "honorario_total": "Honorários previstos (R$)",
+            "link_bitrix": "Bitrix",
             "linha_origem": "Linha",
         },
         moedas=["honorario_total"],
         inteiros=["dias_parado"],
+        alinhar_direita=["dias_status_txt"],
         somar=["honorario_total"],
-        valores_total={"dias_parado": tabela["dias_parado"].mean()},
+        valores_total={
+            "dias_parado": tabela["dias_parado"].mean(),
+            "dias_status_txt": (
+                "—" if tabela["dias_status"].isna().all()
+                else str(int(round(tabela["dias_status"].mean())))
+            ),
+        },
         vazio="Sem clientes aguardando protocolo.",
     )
     st.caption(
         "Dias desde o contrato: dias corridos entre a data do contrato e hoje. "
-        "Na linha de total, a média desses dias entre os clientes listados."
+        "No status atual desde: a última vez que o STATUS da linha foi mudado para "
+        "o valor de hoje (MINUTA, por exemplo), segundo o log de alterações. "
+        "\"Antes de\" indica que a mudança é anterior ao início do log. Na linha "
+        "de total, as médias de dias entre os clientes listados."
     )
 
 

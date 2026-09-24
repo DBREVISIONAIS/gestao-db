@@ -277,6 +277,7 @@ def tabela_compacta(
     medias: dict | None = None,
     vazio: str = "Sem dados no filtro.",
     valores_total: dict | None = None,
+    alinhar_direita: list[str] | tuple = (),
 ) -> None:
     """
     Tabela-resumo enxuta, em HTML.
@@ -307,7 +308,17 @@ def tabela_compacta(
             if coluna in base.columns:
                 base.loc[base.index[-1], coluna] = valor
 
-    numericas = set(moedas) | set(inteiros) | set(percentuais)
+    numericas = set(moedas) | set(inteiros) | set(percentuais) | set(alinhar_direita)
+    # Link do Bitrix vira um link clicável que abre em outra aba. É a única
+    # célula montada em HTML; o resto é escapado.
+    links = {}
+    if "link_bitrix" in base.columns:
+        for posicao, valor in enumerate(base["link_bitrix"]):
+            url = url_bitrix(valor) if isinstance(valor, str) else None
+            links[posicao] = (
+                f'<a href="{escape(url, quote=True)}" target="_blank" '
+                f'rel="noopener">Abrir ↗</a>' if url else ""
+            )
     for coluna in base.columns:
         if coluna in moedas:
             base[coluna] = base[coluna].apply(moeda_cheia)
@@ -336,7 +347,9 @@ def tabela_compacta(
     ultima = len(base) - 1
     for posicao, (_, registro) in enumerate(base.iterrows()):
         celulas = "".join(
-            f'<td class="{classe(c)}">{escape(str(registro[c]))}</td>'
+            f'<td class="{classe(c)}">'
+            + (links.get(posicao, "") if c == "link_bitrix" else escape(str(registro[c])))
+            + "</td>"
             for c in base.columns
         )
         atributo = ' class="total"' if total and posicao == ultima else ""
