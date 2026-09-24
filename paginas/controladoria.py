@@ -32,7 +32,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from db.normalizacao import converter_data, normalizar_texto
+from db.normalizacao import converter_data_segura, normalizar_texto
 from paginas import componentes as ui
 
 CAMPOS_ABERTURA = {"AUTOR", "CLIENTE"}
@@ -223,13 +223,14 @@ def extrair_eventos(logs: pd.DataFrame) -> pd.DataFrame:
     # Conversão de data só nas células de FATAL: é a única coluna em que
     # a data importa aqui, e converter o log inteiro custava segundos.
     e_fatal = base["campo"].isin(CAMPOS_FATAL)
-    data_antes = pd.Series(pd.NaT, index=base.index, dtype="datetime64[ns]")
-    data_depois = pd.Series(pd.NaT, index=base.index, dtype="datetime64[ns]")
-    if e_fatal.any():
-        data_antes[e_fatal] = pd.to_datetime(
-            _mapa_unico(base.loc[e_fatal, "antes"], converter_data), errors="coerce")
-        data_depois[e_fatal] = pd.to_datetime(
-            _mapa_unico(base.loc[e_fatal, "depois"], converter_data), errors="coerce")
+    data_antes = pd.to_datetime(
+        _mapa_unico(base["antes"].where(e_fatal, ""), converter_data_segura),
+        errors="coerce",
+    )
+    data_depois = pd.to_datetime(
+        _mapa_unico(base["depois"].where(e_fatal, ""), converter_data_segura),
+        errors="coerce",
+    )
     data_nova = data_depois.notna()
     aguarda = (
         base["campo"].isin(CAMPOS_FATAL)

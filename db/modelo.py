@@ -21,6 +21,7 @@ from db.normalizacao import (
     extrair_resultados_processuais,
     classificar_tipo_prazo,
     converter_data,
+    converter_data_segura,
     converter_numero,
     converter_percentual,
     diferenca_dias,
@@ -141,8 +142,8 @@ def carregar_prazos() -> pd.DataFrame:
         # Data de controle: Prazo Fatal e, na ausencia dele, Data Final.
         # Mesma regra do DASH PRAZOS. Sem esse fallback, milhares de
         # registros ficariam fora da contagem operacional.
-        fatal = converter_data(prazo_fatal)
-        final = converter_data(data_final)
+        fatal = converter_data_segura(prazo_fatal)
+        final = converter_data_segura(data_final)
 
         # O campo FATAL nem sempre traz data. Ele também recebe texto,
         # e AGUARDA é uma situação declarada de propósito, diferente de
@@ -167,7 +168,7 @@ def carregar_prazos() -> pd.DataFrame:
 
         situacao, dias_para_fatal = _situacao_prazo(data_controle, encerrado, hoje)
         resultados = extrair_resultados_processuais(conteudo, observacao)
-        data_referencia = converter_data(
+        data_referencia = converter_data_segura(
             primeiro_preenchido([data_evento, prazo_fatal, data_final])
         )
 
@@ -176,10 +177,10 @@ def carregar_prazos() -> pd.DataFrame:
                 "linha_origem": indice,
                 "autor": str(autor).strip(),
                 "link_bitrix": valor_por_cabecalho(linha, mapa, ["LINK BITRIX"]),
-                "data_evento": converter_data(data_evento),
+                "data_evento": converter_data_segura(data_evento),
                 "prazo_texto": valor_por_cabecalho(linha, mapa, ["PRAZO"]),
-                "data_final": converter_data(data_final),
-                "prazo_fatal": converter_data(prazo_fatal),
+                "data_final": converter_data_segura(data_final),
+                "prazo_fatal": converter_data_segura(prazo_fatal),
                 "conteudo": str(conteudo).strip(),
                 "observacao": str(observacao).strip(),
                 "responsavel": str(responsavel).strip() or "SEM RESPONSÁVEL",
@@ -317,7 +318,7 @@ def carregar_clientes() -> pd.DataFrame:
             ]
         )
         sentenca = valor_por_cabecalho(linha, mapa, ["SENTENCA PROCEDENTE"])
-        data_referencia = converter_data(
+        data_referencia = converter_data_segura(
             primeiro_preenchido([data_ajuizamento, data_contrato])
         )
 
@@ -332,8 +333,8 @@ def carregar_clientes() -> pd.DataFrame:
                 ).strip()
                 or "SEM RESPONSÁVEL",
                 "link_bitrix": valor_por_cabecalho(linha, mapa, ["LINK BITRIX"]),
-                "data_contrato": converter_data(data_contrato),
-                "data_ajuizamento": converter_data(data_ajuizamento),
+                "data_contrato": converter_data_segura(data_contrato),
+                "data_ajuizamento": converter_data_segura(data_ajuizamento),
                 "calculo_real": calculo_real,
                 "percentual_honorarios": converter_percentual(
                     valor_por_cabecalho(
@@ -356,25 +357,25 @@ def carregar_clientes() -> pd.DataFrame:
                 "valor_ajuizado": valor_ajuizado,
                 "tribunal": valor_por_cabecalho(linha, mapa, ["TRIBUNAL AJUIZAMENTO"]),
                 "liminar": valor_por_cabecalho_parcial(linha, mapa, "LIMINAR CONCEDIDA"),
-                "data_primeiro_faturamento": converter_data(
+                "data_primeiro_faturamento": converter_data_segura(
                     valor_por_cabecalho(
                         linha, mapa, ["DATA 1 FATURAMENTO", "DATA PRIMEIRO FATURAMENTO"]
                     )
                 ),
                 "sentenca_procedente": sentenca,
                 "resultado_sentenca": classificar_resultado_sentenca(sentenca),
-                "data_sentenca": converter_data(
+                "data_sentenca": converter_data_segura(
                     valor_por_cabecalho(linha, mapa, ["DATA SENTENCA"])
                 ),
-                "data_transito": converter_data(
+                "data_transito": converter_data_segura(
                     valor_por_cabecalho_parcial(linha, mapa, "DATA TJ PROC CONHECIMENTO")
                 ),
-                "data_faturamento_restituicao": converter_data(
+                "data_faturamento_restituicao": converter_data_segura(
                     valor_por_cabecalho_parcial(
                         linha, mapa, "DATA FATURAMENTO RESTITUICAO"
                     )
                 ),
-                "data_conclusao_execucao": converter_data(
+                "data_conclusao_execucao": converter_data_segura(
                     valor_por_cabecalho_parcial(linha, mapa, "DATA CONCLUSAO EXECUCAO")
                 ),
                 "diagnostico": valor_por_cabecalho(linha, mapa, ["DIAGNOSTICO"]),
@@ -383,7 +384,7 @@ def carregar_clientes() -> pd.DataFrame:
                     data_contrato, data_ajuizamento
                 ),
                 "encerrado": normalizar_texto(status) in STATUS_ENCERRADOS_CLIENTES,
-                "ajuizado": pd.notna(converter_data(data_ajuizamento)),
+                "ajuizado": pd.notna(converter_data_segura(data_ajuizamento)),
                 "possui_calculo": valor_preenchido(calculo_real) or valor_ajuizado != 0,
                 "data_referencia": data_referencia,
             }
@@ -521,9 +522,13 @@ def carregar_logs() -> pd.DataFrame:
         faltando = convertido.isna()
     if faltando.any():
         convertido[faltando] = pd.to_datetime(
-            dados.loc[faltando, "data_hora"].apply(converter_data), errors="coerce"
+            dados.loc[faltando, "data_hora"].apply(converter_data_segura), errors="coerce"
         )
-    dados["data_hora"] = convertido
+    # O pandas 3 aceita datas como o ano 206, que as operações seguintes
+    # não suportam; ano fora de 1900 a 2100 é erro de digitação e vira vazio.
+    fora = convertido.notna() & ~convertido.dt.year.between(1900, 2100)
+    convertido = convertido.mask(fora)
+    dados["data_hora"] = convertido.astype("datetime64[ns]")
     dados["linha"] = pd.to_numeric(dados["linha"], errors="coerce")
     dados = dados.sort_values("data_hora", ascending=False, na_position="last")
     # Identidade do editor: e-mail sempre que existir. A chave anônima
@@ -627,7 +632,7 @@ def estado_do_espelho() -> dict:
 
 def minutos_desde_atualizacao(estado: dict) -> float | None:
     """Idade do espelho em minutos, ou None se nao houver registro."""
-    momento = converter_data(estado.get("ATUALIZADO_EM"))
+    momento = converter_data_segura(estado.get("ATUALIZADO_EM"))
     if pd.isna(momento):
         return None
     return (datetime.now() - momento).total_seconds() / 60.0
