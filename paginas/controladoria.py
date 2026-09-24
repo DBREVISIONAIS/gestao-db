@@ -320,6 +320,21 @@ def extrair_eventos(logs: pd.DataFrame) -> pd.DataFrame:
         .groupby("prazo")["conteudo"].last()
     )
     eventos["conteudo_prazo"] = eventos["prazo"].map(conteudo).fillna(eventos["conteudo"])
+
+    # Responsável do prazo: o último responsável técnico não vazio que o
+    # log registrou para a linha. Na hora da inclusão ele costuma estar
+    # vazio, porque é preenchido depois do autor e do conteúdo.
+    responsaveis = (
+        base[base["responsavel_tecnico"].astype(str).str.strip() != ""]
+        .sort_values("data_hora")
+        .groupby("chave_origem")["responsavel_tecnico"].last()
+    )
+    eventos["responsavel_prazo"] = (
+        eventos["chave_origem"].map(responsaveis)
+        .fillna(eventos["responsavel_tecnico"])
+        .astype(str).str.strip().str.upper()
+        .replace({"": "SEM RESPONSÁVEL", "NAN": "SEM RESPONSÁVEL"})
+    )
     eventos["compromisso"] = _mapa_unico(eventos["conteudo_prazo"], tipo_compromisso)
     eventos["papel"] = [
         papel_da_linha(texto) if tipo != "DEMAIS PRAZOS" else ""
@@ -405,9 +420,10 @@ def painel(eventos: pd.DataFrame, prazos: pd.DataFrame) -> None:
         "Por dia": lambda: _por_dia(recorte),
         "Controladoria": lambda: _controladoria(recorte, equipe, eventos),
         "Retrabalho": lambda: _retrabalho(recorte),
-        "Protocolos dos advogados": lambda: _protocolos(recorte),
+        "Protocolos dos advogados": lambda: _protocolos(recorte, inicio, fim),
         "Horários": lambda: _horarios(recorte),
         "Audiências, sessões e perícias": lambda: _compromissos(recorte, prazos),
+        "Prazos por advogado": lambda: _por_advogado(recorte, eventos, prazos, inicio, fim),
         "Médias": lambda: _medias(recorte, equipe, inicio, fim),
         "Resumo mensal": lambda: _mensal(eventos, equipe),
     }
@@ -870,11 +886,37 @@ def _retrabalho(recorte: pd.DataFrame) -> None:
         )
 
 
-def _protocolos(recorte: pd.DataFrame) -> None:
+def _protocolos(recorte: pd.DataFrame, inicio: pd.Timestamp, fim: pd.Timestamp) -> None:
     protocolos = recorte[recorte["evento"] == "protocolo"]
     if protocolos.empty:
         st.info("Nenhum protocolo marcado no período.")
         return
+
+    # Média geral do escritório. Duas leituras, porque respondem perguntas
+    # diferentes: por dia útil do período (ritmo do escritório, contando
+    # dia sem protocolo como zero) e por dia em que houve protocolo.
+    dias_uteis = max(len(pd.bdate_range(inicio, min(fim, pd.Timestamp(date.today())))), 1)
+    dias_com_protocolo = protocolos["dia"].nunique()
+    por_dia = protocolos.groupby("dia").size()
+    colunas = st.columns(4)
+    ui.cartao(colunas[0], "Protocolos no período", len(protocolos))
+    ui.cartao(
+        colunas[1], "Média geral por dia útil",
+        f"{len(protocolos) / dias_uteis:.1f}".replace(".", ","),
+        f"Total dividido pelos {dias_uteis} dias úteis do período; dia útil sem "
+        "protocolo conta como zero.",
+    )
+    ui.cartao(
+        colunas[2], "Média por dia com protocolo",
+        f"{len(protocolos) / dias_com_protocolo:.1f}".replace(".", ","),
+        f"Total dividido pelos {dias_com_protocolo} dias em que houve pelo menos "
+        "um protocolo.",
+    )
+    ui.cartao(
+        colunas[3], "Maior dia",
+        int(por_dia.max()),
+        f"Em {por_dia.idxmax().strftime('%d/%m/%Y')}.",
+    )
 
     st.caption(
         "Protocolo é o momento em que o STATUS do prazo passou a PROTOCOLADO. "
@@ -898,12 +940,24 @@ def _protocolos(recorte: pd.DataFrame) -> None:
         por_resp["media"] = (por_resp["protocolos"] / por_resp["dias"]).map(
             lambda v: f"{v:.1f}".replace(".", ",")
         )
+        por_resp["media_util"] = (por_resp["protocolos"] / dias_uteis).map(
+            lambda v: f"{v:.1f}".replace(".", ",")
+        )
         ui.tabela_compacta(
             por_resp,
             {"responsavel": "Responsável", "protocolos": "Protocolos",
-             "dias": "Dias com protocolo", "media": "Média por dia"},
+             "dias": "Dias com protocolo", "media": "Média por dia com protocolo",
+             "media_util": "Média por dia útil"},
             inteiros=["protocolos", "dias"],
+            alinhar_direita=["media", "media_util"],
             somar=["protocolos"],
+            # No total, os dias são os dias distintos com algum protocolo no
+            # escritório, e não a soma dos dias de cada advogado.
+            valores_total={
+                "dias": dias_com_protocolo,
+                "media": f"{len(protocolos) / dias_com_protocolo:.1f}".replace(".", ","),
+                "media_util": f"{len(protocolos) / dias_uteis:.1f}".replace(".", ","),
+            },
         )
     with direita:
         st.markdown("#### Por quem marcou")
@@ -1079,6 +1133,152 @@ def _compromissos(recorte: pd.DataFrame, prazos: pd.DataFrame) -> None:
         "Data é o prazo fatal e, sem ele, a data final. Compromisso com FATAL "
         "em AGUARDA não tem data e não aparece aqui."
     )
+
+
+# --------------------------------------------------- prazos por advogado
+
+
+def _por_advogado(recorte: pd.DataFrame, eventos: pd.DataFrame, prazos: pd.DataFrame,
+                  inicio: pd.Timestamp, fim: pd.Timestamp) -> None:
+    """
+    Quantos prazos novos cada advogado recebeu no período, e a carga que
+    cada um tem hoje no controle de prazos.
+    """
+    st.caption(
+        "Prazo novo atribuído ao responsável técnico da linha: o último "
+        "preenchido no log para aquela linha, já que na inclusão ele costuma "
+        "estar vazio. Sem responsável registrado, entra como SEM RESPONSÁVEL."
+    )
+    novos = recorte[recorte["evento"] == "prazo_novo"]
+    if novos.empty:
+        st.info("Nenhum prazo novo no período.")
+        return
+
+    hoje = pd.Timestamp(date.today())
+    fim_util = min(fim, hoje)
+    uteis = max(len(pd.bdate_range(inicio, fim_util)), 1)
+
+    # Comparação das duas últimas semanas corridas, com base em todo o log
+    # (não só no período), para mostrar quem está recebendo mais agora.
+    todos_novos = eventos[eventos["evento"] == "prazo_novo"]
+    ultima = todos_novos[todos_novos["dia"] > hoje - pd.Timedelta(days=7)]
+    anterior = todos_novos[
+        (todos_novos["dia"] <= hoje - pd.Timedelta(days=7))
+        & (todos_novos["dia"] > hoje - pd.Timedelta(days=14))
+    ]
+
+    grupos = agrupar_compromissos(novos)
+    tabela = (
+        novos.groupby("responsavel_prazo")
+        .agg(
+            novos=("prazo", "count"),
+            comuns=("compromisso", lambda c: int((c == "DEMAIS PRAZOS").sum())),
+            linhas_compromisso=("compromisso", lambda c: int((c != "DEMAIS PRAZOS").sum())),
+        )
+        .reset_index()
+        .rename(columns={"responsavel_prazo": "responsavel"})
+    )
+    tabela["participacao"] = tabela["novos"] / tabela["novos"].sum() * 100
+    tabela["por_dia"] = (tabela["novos"] / uteis).map(
+        lambda v: f"{v:.1f}".replace(".", ",")
+    )
+    tabela["ultima_semana"] = tabela["responsavel"].map(
+        ultima.groupby("responsavel_prazo").size()
+    ).fillna(0).astype(int)
+    tabela["semana_anterior"] = tabela["responsavel"].map(
+        anterior.groupby("responsavel_prazo").size()
+    ).fillna(0).astype(int)
+    tabela["variacao"] = tabela["ultima_semana"] - tabela["semana_anterior"]
+    tabela["variacao_txt"] = tabela["variacao"].map(lambda v: f"{v:+d}" if v else "0")
+
+    # Carga atual: prazos em aberto hoje no controle, por responsável.
+    if not prazos.empty and "responsavel" in prazos.columns:
+        abertos = prazos[~prazos["encerrado"].astype(bool)].copy()
+        abertos["resp"] = (abertos["responsavel"].astype(str).str.strip().str.upper()
+                           .replace("", "SEM RESPONSÁVEL"))
+        controle = pd.to_datetime(abertos.get("data_controle"), errors="coerce")
+        carga = abertos.groupby("resp").size()
+        proximos = abertos[(controle >= hoje) & (controle <= hoje + pd.Timedelta(days=7))] \
+            .groupby("resp").size()
+        vencidos = abertos[abertos["situacao"].eq("VENCIDO")].groupby("resp").size() \
+            if "situacao" in abertos.columns else pd.Series(dtype=int)
+        tabela["abertos_hoje"] = tabela["responsavel"].map(carga).fillna(0).astype(int)
+        tabela["proximos_7"] = tabela["responsavel"].map(proximos).fillna(0).astype(int)
+        tabela["vencidos"] = tabela["responsavel"].map(vencidos).fillna(0).astype(int)
+    tabela = tabela.sort_values("novos", ascending=False)
+
+    colunas = st.columns(3)
+    lider = tabela.iloc[0]
+    ui.cartao(colunas[0], "Quem mais recebeu no período", lider["responsavel"],
+              f"{int(lider['novos'])} prazo(s) novo(s), "
+              f"{lider['participacao']:.0f}% do total.".replace(".", ",", 1))
+    recente = tabela.sort_values("ultima_semana", ascending=False).iloc[0]
+    ui.cartao(colunas[1], "Quem mais recebeu nos últimos 7 dias", recente["responsavel"],
+              f"{int(recente['ultima_semana'])} prazo(s) novo(s) na última semana.")
+    sem_resp = int(tabela.loc[tabela["responsavel"] == "SEM RESPONSÁVEL", "novos"].sum())
+    ui.cartao(colunas[2], "Prazos novos sem responsável", sem_resp,
+              "Linhas incluídas no período sem responsável técnico registrado no log.")
+
+    colunas_tabela = {
+        "responsavel": "Responsável",
+        "novos": "Prazos novos",
+        "participacao": "% do total",
+        "por_dia": "Por dia útil",
+        "comuns": "Prazos comuns",
+        "linhas_compromisso": "Linhas aud./sessão/perícia",
+        "ultima_semana": "Últimos 7 dias",
+        "semana_anterior": "7 dias anteriores",
+        "variacao_txt": "Variação",
+    }
+    inteiros = ["novos", "comuns", "linhas_compromisso", "ultima_semana",
+                "semana_anterior"]
+    if "abertos_hoje" in tabela.columns:
+        colunas_tabela.update({
+            "abertos_hoje": "Em aberto hoje",
+            "proximos_7": "Vencem em 7 dias",
+            "vencidos": "Vencidos",
+        })
+        inteiros += ["abertos_hoje", "proximos_7", "vencidos"]
+    ui.tabela_compacta(
+        tabela,
+        colunas_tabela,
+        inteiros=inteiros,
+        percentuais=["participacao"],
+        alinhar_direita=["por_dia", "variacao_txt"],
+        somar=inteiros + ["participacao"],
+        valores_total={
+            "por_dia": f"{tabela['novos'].sum() / uteis:.1f}".replace(".", ","),
+            "variacao_txt": f"{int(tabela['variacao'].sum()):+d}",
+        },
+    )
+    st.caption(
+        f"Período do topo: {uteis} dia(s) útil(eis). \"Últimos 7 dias\" e \"7 dias "
+        "anteriores\" usam o log inteiro, independentemente do período, para mostrar "
+        "quem está recebendo mais agora. \"Em aberto hoje\", \"Vencem em 7 dias\" e "
+        "\"Vencidos\" vêm do controle de prazos atual."
+    )
+
+    diario = novos.groupby(["dia", "responsavel_prazo"]).size().reset_index(name="prazos")
+    figura = px.bar(diario, x="dia", y="prazos", color="responsavel_prazo")
+    figura.update_layout(height=340, xaxis_title="", yaxis_title="Prazos novos",
+                         legend_title="Responsável", barmode="stack")
+    figura.update_xaxes(tickformat="%d/%m")
+    st.plotly_chart(figura, width="stretch", key="ctl_adv_dia")
+
+    st.markdown("#### Por mês")
+    mensal = todos_novos.assign(mes=todos_novos["dia"].dt.to_period("M"))
+    matriz = mensal.pivot_table(index="mes", columns="responsavel_prazo",
+                                values="prazo", aggfunc="count", fill_value=0) \
+        .sort_index(ascending=False)
+    pessoas = list(matriz.columns)
+    matriz["TOTAL"] = matriz.sum(axis=1)
+    matriz.insert(0, "rotulo", [_rotulo_mes(m) for m in matriz.index])
+    ui.tabela_compacta(
+        matriz.reset_index(drop=True),
+        {"rotulo": "Mês", **{p: p for p in pessoas}, "TOTAL": "TOTAL"},
+        inteiros=pessoas + ["TOTAL"],
+    )
+    st.caption("Todos os meses cobertos pelo log. O primeiro mês pode estar incompleto.")
 
 
 # ------------------------------------------------------------- médias
