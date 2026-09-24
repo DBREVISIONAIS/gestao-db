@@ -442,11 +442,26 @@ def _simulador(pipeline: pd.DataFrame, falta: float) -> None:
             "valor, a diferença é coberta. Ajuste a seleção como quiser."
         )
 
+    # A seleção é refeita com a sugestão sempre que o filtro muda. Antes,
+    # o Streamlit guardava a seleção do filtro anterior; com o filtro novo
+    # aqueles clientes deixavam de existir nas opções e a seleção ficava
+    # vazia, zerando o valor.
+    opcoes = ordenado["rotulo"].tolist()
+    assinatura = (tuple(sorted(status)), busca.strip().upper(), len(opcoes), round(falta, 2))
+    if st.session_state.get("sim_assinatura") != assinatura:
+        st.session_state["sim_assinatura"] = assinatura
+        st.session_state["meta_simulacao"] = sugeridos
+    else:
+        # Mantém só o que ainda existe nas opções.
+        st.session_state["meta_simulacao"] = [
+            r for r in st.session_state.get("meta_simulacao", []) if r in opcoes
+        ]
+
     escolhidos = st.multiselect(
         "Clientes a protocolar",
-        ordenado["rotulo"].tolist(),
-        default=sugeridos,
+        opcoes,
         key="meta_simulacao",
+        placeholder="Escolha os clientes",
     )
 
     selecionados = ordenado[ordenado["rotulo"].isin(escolhidos)]

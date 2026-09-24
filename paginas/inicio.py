@@ -88,8 +88,14 @@ def cartoes(logado: bool) -> None:
 
 
 def render(usuario: dict) -> None:
-    primeiro_nome = str(usuario.get("nome", "")).split(" ")[0]
-    st.subheader(f"Olá, {primeiro_nome}" if primeiro_nome else "Início")
+    # No acesso por senha única não há pessoa identificada: a saudação é
+    # para o escritório. Com usuários individuais, usa o primeiro nome.
+    if usuario.get("login") == "acesso":
+        saudacao = "Olá, DB"
+    else:
+        primeiro_nome = str(usuario.get("nome", "")).split(" ")[0]
+        saudacao = f"Olá, {primeiro_nome}" if primeiro_nome else "Olá, DB"
+    st.subheader(saudacao)
     st.caption(
         "Escolha o sistema. Os sistemas externos abrem em outra aba e pedem a "
         "senha própria de cada um."
