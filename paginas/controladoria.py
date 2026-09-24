@@ -155,24 +155,35 @@ def tipo_compromisso(texto) -> str:
 # ------------------------------------------------------------ eventos
 
 
+def _mapa_unico(serie: pd.Series, funcao) -> pd.Series:
+    """
+    Aplica a função uma vez por valor distinto. No log, os mesmos textos
+    se repetem milhares de vezes (nomes de coluna, status, datas), e
+    normalizar linha a linha era o que deixava a aba lenta.
+    """
+    valores = serie.astype(str)
+    mapa = {v: funcao(v) for v in valores.unique()}
+    return valores.map(mapa)
+
+
 def extrair_eventos(logs: pd.DataFrame) -> pd.DataFrame:
     """Uma linha por evento reconhecido, com quem, quando e qual prazo."""
     if logs.empty:
         return pd.DataFrame()
 
     base = logs[
-        logs["aba_origem"].astype(str).map(normalizar_texto).str.contains("PRAZO", na=False)
+        _mapa_unico(logs["aba_origem"], normalizar_texto).str.contains("PRAZO", na=False)
     ].copy()
     if base.empty:
         return pd.DataFrame()
 
     base["data_hora"] = pd.to_datetime(base["data_hora"], errors="coerce")
     base = base.dropna(subset=["data_hora"])
-    base["campo"] = base["cabecalho"].astype(str).map(normalizar_texto)
+    base["campo"] = _mapa_unico(base["cabecalho"], normalizar_texto)
     base["antes"] = base["valor_anterior"].astype(str).str.strip()
     base["depois"] = base["valor_novo"].astype(str).str.strip()
-    base["antes_n"] = base["antes"].map(normalizar_texto)
-    base["depois_n"] = base["depois"].map(normalizar_texto)
+    base["antes_n"] = _mapa_unico(base["antes"], normalizar_texto)
+    base["depois_n"] = _mapa_unico(base["depois"], normalizar_texto)
 
     # Identidade do prazo: ID permanente quando o Apps Script grava, e
     # na falta dele a linha somada ao nome do autor no momento da edição.
@@ -182,7 +193,7 @@ def extrair_eventos(logs: pd.DataFrame) -> pd.DataFrame:
     base["prazo"] = np.where(
         id_prazo != "",
         "ID:" + id_prazo,
-        base["chave_origem"].astype(str) + "|" + base["cliente_autor"].map(normalizar_texto),
+        base["chave_origem"].astype(str) + "|" + _mapa_unico(base["cliente_autor"], normalizar_texto),
     )
 
     # Sessão de trabalho: edições seguidas da mesma pessoa na mesma linha,
@@ -192,8 +203,11 @@ def extrair_eventos(logs: pd.DataFrame) -> pd.DataFrame:
     base = base.sort_values(["editor", "chave_origem", "data_hora"])
     pausa = base.groupby(["editor", "chave_origem"])["data_hora"].diff()
     base["sessao"] = (pausa.isna() | (pausa > pd.Timedelta(minutes=MINUTOS_SESSAO))).cumsum()
-    duracao = base.groupby("sessao")["data_hora"].agg(lambda d: (d.max() - d.min()).total_seconds() / 60)
-    base["minutos_sessao"] = base["sessao"].map(duracao).clip(lower=1.0)
+    grupo_sessao = base.groupby("sessao")["data_hora"]
+    base["minutos_sessao"] = (
+        (grupo_sessao.transform("max") - grupo_sessao.transform("min"))
+        .dt.total_seconds() / 60
+    ).clip(lower=1.0)
 
     tipo = base["tipo_evento"].astype(str).str.upper()
 
@@ -206,7 +220,17 @@ def extrair_eventos(logs: pd.DataFrame) -> pd.DataFrame:
         & (base["depois"] != "")
         & (base["depois"] != base["antes"])
     )
-    data_nova = base["depois"].map(lambda v: pd.notna(converter_data(v)))
+    # Conversão de data só nas células de FATAL: é a única coluna em que
+    # a data importa aqui, e converter o log inteiro custava segundos.
+    e_fatal = base["campo"].isin(CAMPOS_FATAL)
+    data_antes = pd.Series(pd.NaT, index=base.index, dtype="datetime64[ns]")
+    data_depois = pd.Series(pd.NaT, index=base.index, dtype="datetime64[ns]")
+    if e_fatal.any():
+        data_antes[e_fatal] = pd.to_datetime(
+            _mapa_unico(base.loc[e_fatal, "antes"], converter_data), errors="coerce")
+        data_depois[e_fatal] = pd.to_datetime(
+            _mapa_unico(base.loc[e_fatal, "depois"], converter_data), errors="coerce")
+    data_nova = data_depois.notna()
     aguarda = (
         base["campo"].isin(CAMPOS_FATAL)
         & base["antes_n"].str.contains("AGUARDA", na=False)
@@ -223,8 +247,6 @@ def extrair_eventos(logs: pd.DataFrame) -> pd.DataFrame:
         & (base["antes"] != "")
         & (base["depois_n"] != base["antes_n"])
     )
-    data_antes = base["antes"].map(converter_data)
-    data_depois = base["depois"].map(converter_data)
     alteracao_fatal = (
         base["campo"].isin(CAMPOS_FATAL)
         & data_antes.notna() & data_depois.notna()
@@ -297,7 +319,7 @@ def extrair_eventos(logs: pd.DataFrame) -> pd.DataFrame:
         .groupby("prazo")["conteudo"].last()
     )
     eventos["conteudo_prazo"] = eventos["prazo"].map(conteudo).fillna(eventos["conteudo"])
-    eventos["compromisso"] = eventos["conteudo_prazo"].map(tipo_compromisso)
+    eventos["compromisso"] = _mapa_unico(eventos["conteudo_prazo"], tipo_compromisso)
     eventos["papel"] = [
         papel_da_linha(texto) if tipo != "DEMAIS PRAZOS" else ""
         for texto, tipo in zip(eventos["conteudo_prazo"], eventos["compromisso"])
@@ -376,22 +398,22 @@ def painel(eventos: pd.DataFrame, prazos: pd.DataFrame) -> None:
     dias_uteis = max(int(np.busday_count(inicio.date(), (fim + pd.Timedelta(days=1)).date())), 1)
     _cartoes(recorte, dias_uteis)
 
-    abas = st.tabs(["Por dia", "Controladoria", "Retrabalho", "Protocolos dos advogados",
-                    "Horários", "Audiências, sessões e perícias", "Resumo mensal"])
-    with abas[0]:
-        _por_dia(recorte)
-    with abas[1]:
-        _controladoria(recorte, equipe, eventos)
-    with abas[2]:
-        _retrabalho(recorte)
-    with abas[3]:
-        _protocolos(recorte)
-    with abas[4]:
-        _horarios(recorte)
-    with abas[5]:
-        _compromissos(recorte, prazos)
-    with abas[6]:
-        _mensal(eventos, equipe)
+    # Seletor em vez de st.tabs: com abas, o Streamlit calcula e desenha
+    # o conteúdo de todas a cada clique; com o seletor, só a seção aberta.
+    secoes = {
+        "Por dia": lambda: _por_dia(recorte),
+        "Controladoria": lambda: _controladoria(recorte, equipe, eventos),
+        "Retrabalho": lambda: _retrabalho(recorte),
+        "Protocolos dos advogados": lambda: _protocolos(recorte),
+        "Horários": lambda: _horarios(recorte),
+        "Audiências, sessões e perícias": lambda: _compromissos(recorte, prazos),
+        "Resumo mensal": lambda: _mensal(eventos, equipe),
+    }
+    secao = st.segmented_control(
+        "Seção", list(secoes), default="Por dia", key="ctl_secao",
+        label_visibility="collapsed",
+    ) or "Por dia"
+    secoes[secao]()
 
 
 def _cartoes(recorte: pd.DataFrame, dias_uteis: int) -> None:

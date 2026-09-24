@@ -509,7 +509,21 @@ def carregar_logs() -> pd.DataFrame:
     if dados.empty:
         return dados
 
-    dados["data_hora"] = dados["data_hora"].apply(converter_data)
+    # Conversão vetorizada nos formatos que o Apps Script grava; só o que
+    # sobrar vai para o conversor linha a linha, que é bem mais lento.
+    texto = dados["data_hora"].astype(str).str.strip()
+    convertido = pd.to_datetime(texto, format="%d/%m/%Y %H:%M:%S", errors="coerce")
+    faltando = convertido.isna()
+    if faltando.any():
+        convertido[faltando] = pd.to_datetime(
+            texto[faltando], format="%d/%m/%Y %H:%M", errors="coerce"
+        )
+        faltando = convertido.isna()
+    if faltando.any():
+        convertido[faltando] = pd.to_datetime(
+            dados.loc[faltando, "data_hora"].apply(converter_data), errors="coerce"
+        )
+    dados["data_hora"] = convertido
     dados["linha"] = pd.to_numeric(dados["linha"], errors="coerce")
     dados = dados.sort_values("data_hora", ascending=False, na_position="last")
     # Identidade do editor: e-mail sempre que existir. A chave anônima

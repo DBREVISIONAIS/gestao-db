@@ -184,6 +184,17 @@ def aplicar_identidade_visual() -> None:
 
         /* Navegação e botões */
         div[data-testid="stSegmentedControl"] button {{ font-weight: 600; }}
+        /* Barra de páginas mais compacta, para caber numa linha. */
+        div[data-testid="stSegmentedControl"] button {{
+            padding: 0.3rem 0.75rem !important;
+            font-size: 0.86rem !important;
+            min-height: 2.1rem !important;
+        }}
+        /* Botões só com ícone (Atualizar e Sair): quadrados e discretos. */
+        .st-key-botao_atualizar button, .st-key-botao_sair button {{
+            padding: 0.3rem 0.55rem !important;
+            min-height: 2.1rem !important;
+        }}
         .stButton button {{
             border-radius: 6px;
             font-weight: 600;
@@ -319,7 +330,9 @@ def barra_superior(usuario: dict) -> str:
     """
     paginas = auth.regras_atuais()["paginas"]
 
-    navegacao, atualizar, sair = st.columns([8, 1.3, 1])
+    # Botões estreitos, só com ícone e o tamanho do conteúdo, para a barra
+    # de páginas ficar com quase toda a largura e não ser cortada.
+    navegacao, acoes = st.columns([14, 1.4], vertical_alignment="center")
 
     with navegacao:
         pagina = st.segmented_control(
@@ -329,14 +342,18 @@ def barra_superior(usuario: dict) -> str:
             key="pagina_atual",
             label_visibility="collapsed",
         )
-    with atualizar:
-        if st.button("Atualizar", width="stretch"):
-            limpar_tudo()
-            st.rerun()
-    with sair:
-        if st.button("Sair", width="stretch"):
-            st.session_state.clear()
-            st.rerun()
+    with acoes:
+        atualizar, sair = st.columns(2, gap="small")
+        with atualizar:
+            if st.button("", icon=":material/refresh:", help="Atualizar os dados agora",
+                         key="botao_atualizar", width="content"):
+                limpar_tudo()
+                st.rerun()
+        with sair:
+            if st.button("", icon=":material/logout:", help="Sair do painel",
+                         key="botao_sair", width="content"):
+                st.session_state.clear()
+                st.rerun()
 
     return pagina or paginas[0]
 
