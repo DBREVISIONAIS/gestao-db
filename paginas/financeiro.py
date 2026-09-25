@@ -108,13 +108,44 @@ def metas(clientes: pd.DataFrame) -> None:
         if any(t in e for t in ("MINUTA", "ESTRAT", "REVIS", "PROTOCOLAR"))
     ] or etapas
 
+    st.markdown("**Parado fora do protocolo**")
+    st.caption(
+        "São os clientes que já têm honorário previsto lançado e ainda não "
+        "foram protocolados. Esse valor é o que pode virar realizado sem "
+        "depender de contrato novo. Escolha abaixo quais etapas você "
+        "considera realmente próximas do protocolo: quanto mais etapas "
+        "entram, mais otimista fica a projeção."
+    )
+
     cenario = st.multiselect(
-        "Cenário do pipeline: quais etapas contam como próximas do protocolo",
+        "Etapas que contam no pipeline",
         etapas,
         default=padrao,
         key="meta_cenario",
     )
     pipeline = disponivel[disponivel["status"].isin(cenario)] if cenario else disponivel
+
+    composicao = (
+        disponivel.groupby("status")
+        .agg(clientes=("cliente", "count"), previsto=("honorario_total", "sum"))
+        .reset_index()
+        .sort_values("previsto", ascending=False)
+    )
+    composicao["no_cenario"] = composicao["status"].isin(cenario).map(
+        {True: "sim", False: "não"}
+    )
+    with st.expander("Composição do pipeline por etapa"):
+        ui.tabela(
+            ui.formatar_moedas(composicao, ["previsto"]),
+            {
+                "status": "Etapa",
+                "clientes": "Clientes",
+                "previsto": "Previsto",
+                "no_cenario": "Conta no cenário",
+            },
+            "Nenhum cliente com valor aguardando protocolo.",
+        )
+
     valor_pipeline = float(pipeline["honorario_total"].sum())
 
     hoje = date.today()
@@ -273,16 +304,30 @@ def _simulador(pipeline: pd.DataFrame, falta: float) -> None:
             sugeridos.append(linha["rotulo"])
             acumulado += float(linha["honorario_total"])
 
-    if sugeridos:
-        st.caption(
-            f"Sugestão automática: protocolando {len(sugeridos)} cliente(s) de maior "
-            "valor, a diferença é coberta. Ajuste a seleção como quiser."
+    # Ao mudar o filtro, as opções do seletor mudam e o Streamlit
+    # descarta as escolhas que não existem mais, sem reaplicar o
+    # default. Sem este reset a seleção ficava vazia e os cartões
+    # zeravam logo depois de filtrar.
+    assinatura = (tuple(status), busca.strip().lower(), round(falta, 2))
+    if st.session_state.get("sim_assinatura") != assinatura:
+        st.session_state["sim_assinatura"] = assinatura
+        st.session_state["meta_simulacao"] = sugeridos
+
+    total_filtro = float(ordenado["honorario_total"].sum())
+    st.caption(
+        f"{len(ordenado)} cliente(s) no filtro, somando "
+        f"{formatar_moeda(total_filtro)}. "
+        + (
+            f"A sugestão abaixo cobre a diferença com "
+            f"{len(sugeridos)} deles."
+            if sugeridos
+            else "A meta já está coberta."
         )
+    )
 
     escolhidos = st.multiselect(
         "Clientes a protocolar",
         ordenado["rotulo"].tolist(),
-        default=sugeridos,
         key="meta_simulacao",
     )
 
@@ -290,11 +335,15 @@ def _simulador(pipeline: pd.DataFrame, falta: float) -> None:
     soma = float(selecionados["honorario_total"].sum())
     restante = falta - soma
 
-    colunas = st.columns(3)
-    ui.cartao(colunas[0], "Selecionados", len(selecionados))
-    ui.cartao(colunas[1], "Valor da seleção", formatar_moeda(soma))
+    colunas = st.columns(4)
     ui.cartao(
-        colunas[2],
+        colunas[0], "Disponível no filtro", formatar_moeda(total_filtro),
+        f"{len(ordenado)} cliente(s) aguardando protocolo no filtro atual.",
+    )
+    ui.cartao(colunas[1], "Selecionados", len(selecionados))
+    ui.cartao(colunas[2], "Valor da seleção", formatar_moeda(soma))
+    ui.cartao(
+        colunas[3],
         "Diferença após protocolo",
         formatar_moeda(max(restante, 0.0)),
         "Quanto ainda faltaria para a meta anual.",
@@ -520,7 +569,7 @@ def painel(clientes: pd.DataFrame) -> None:
         return
 
     st.markdown("#### Honorários por mês e por serviço")
-    st.caption("Valores abreviados: mi para milhão, mil para milhar.")
+    st.caption("Valores em R$, sem abreviação.")
     matriz = ui.matriz_compacta(
         base, "competencia_ajuizamento", "servico", "honorario_total", "Mês"
     )

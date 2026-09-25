@@ -194,11 +194,12 @@ def matriz_compacta(
     formato: str = "moeda",
 ) -> pd.DataFrame:
     """
-    Tabela cruzada enxuta.
+    Tabela cruzada com valores cheios, coluna e linha de total.
 
     Colunas inteiramente zeradas saem, porque só empurram a informação
-    para fora da tela. Acrescenta uma coluna de total e, quando o
-    formato é moeda, abrevia os valores para caber sem rolagem.
+    para fora da tela. Os valores vão por extenso, e não abreviados:
+    em conferência financeira o arredondamento atrapalha mais do que a
+    largura da tabela.
     """
     if dados.empty:
         return pd.DataFrame()
@@ -213,18 +214,23 @@ def matriz_compacta(
     matriz["TOTAL"] = matriz.sum(axis=1)
     matriz = matriz.reset_index().rename(columns={indice: rotulo_indice})
 
-    if formato == "moeda":
-        for nome in matriz.columns:
-            if nome != rotulo_indice:
-                matriz[nome] = matriz[nome].apply(moeda_curta)
-    else:
-        # Tudo vira texto: misturar inteiro e travessão na mesma coluna
-        # quebra a serialização da tabela.
-        for nome in matriz.columns:
-            if nome != rotulo_indice:
-                matriz[nome] = (
-                    matriz[nome].astype(int).astype(str).replace("0", "—")
-                )
+    # Linha de total, somando cada coluna.
+    totais = {rotulo_indice: "TOTAL"}
+    for nome in matriz.columns:
+        if nome != rotulo_indice:
+            totais[nome] = matriz[nome].sum()
+    matriz = pd.concat([matriz, pd.DataFrame([totais])], ignore_index=True)
+
+    for nome in matriz.columns:
+        if nome == rotulo_indice:
+            continue
+        if formato == "moeda":
+            matriz[nome] = matriz[nome].apply(
+                lambda v: "—" if not v else
+                f"{v:,.2f}".replace(",", "@").replace(".", ",").replace("@", ".")
+            )
+        else:
+            matriz[nome] = matriz[nome].astype(int).astype(str).replace("0", "—")
 
     return matriz
 
