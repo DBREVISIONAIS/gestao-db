@@ -19,8 +19,8 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-from db import auth, modelo
-from db.normalizacao import formatar_moeda, normalizar_texto
+from db import auth
+from db.normalizacao import formatar_moeda
 from paginas import componentes as ui
 
 
@@ -82,8 +82,9 @@ def metas(clientes: pd.DataFrame) -> None:
             help="Serve só de linha de comparação. O que fecha o ano é a meta anual.",
         )
 
+    # Realizado do ano: protocolado de fato, com data dentro do ano.
     ajuizados = clientes[
-        clientes["ajuizado"] & (clientes["ano_ajuizamento"] == ano)
+        clientes["protocolado"] & (clientes["ano_ajuizamento"] == ano)
     ].copy()
     realizado = float(ajuizados["honorario_total"].sum())
     falta = max(meta_anual - realizado, 0.0)
@@ -96,7 +97,7 @@ def metas(clientes: pd.DataFrame) -> None:
     # em checklist antigo até pré-descarte, o que superestima a chance
     # de bater a meta.
     disponivel = clientes[
-        (~clientes["ajuizado"])
+        (~clientes["protocolado"])
         & (clientes["honorario_total"] > 0)
         & (~clientes["encerrado"])
     ].copy()
@@ -121,7 +122,7 @@ def metas(clientes: pd.DataFrame) -> None:
 
     colunas = st.columns(4)
     ui.cartao(colunas[0], "Realizado no ano", formatar_moeda(realizado),
-              f"{len(ajuizados)} ajuizamento(s) em {ano}.")
+              f"{len(ajuizados)} protocolo(s) em {ano}.")
     ui.cartao(colunas[1], "Falta para a meta", formatar_moeda(falta),
               f"{percentual:.1f}% da meta atingido.".replace(".", ","))
     ui.cartao(
@@ -155,108 +156,8 @@ def metas(clientes: pd.DataFrame) -> None:
             "depende de contratos novos."
         )
 
-    _composicao_por_nucleo(ajuizados, pipeline, meta_anual, falta)
     _evolucao(ajuizados, meta_anual, meta_mensal, ano)
     _simulador(pipeline, falta)
-
-
-# Cor fixa por núcleo, para o mesmo serviço ter a mesma cor em qualquer
-# gráfico. Núcleo novo que apareça na planilha recebe cor da sequência.
-CORES_NUCLEO = {
-    "ISENÇÃO IR": "#1A3762",
-    "BANCÁRIO": "#4DA2DA",
-    "CONTRIBUIÇÃO PREV": "#F7BD2E",
-    "PREVIDENCIÁRIO": "#2E7D32",
-    "DIVERSOS": "#C1B7AD",
-    "FALTA PARA A META": "#E3E9F0",
-}
-
-
-def _composicao_por_nucleo(ajuizados, pipeline, meta_anual, falta) -> None:
-    """
-    Quanto cada núcleo (serviço) já entregou da meta do ano.
-
-    A pizza tem a meta inteira como 100%: cada fatia é o realizado de
-    um núcleo e a fatia cinza é o que falta. A tabela ao lado cruza
-    isso com o pipeline do cenário escolhido acima, para mostrar de
-    qual núcleo pode vir o que falta.
-    """
-    st.markdown("#### Participação de cada núcleo na meta")
-
-    if ajuizados.empty and pipeline.empty:
-        st.info("Sem ajuizamentos nem pipeline no ano selecionado.")
-        return
-
-    quantidade = ajuizados.groupby("servico").size().rename("ajuizamentos")
-    realizado = ajuizados.groupby("servico")["honorario_total"].sum().rename("realizado")
-    parado = pipeline.groupby("servico")["honorario_total"].sum().rename("pipeline")
-    nucleos = pd.concat([quantidade, realizado, parado], axis=1).fillna(0)
-    nucleos.index.name = "servico"
-    nucleos = nucleos.reset_index().sort_values("realizado", ascending=False)
-
-    total_realizado = float(nucleos["realizado"].sum())
-    nucleos["pct_realizado"] = (
-        nucleos["realizado"] / total_realizado * 100 if total_realizado else 0.0
-    )
-    nucleos["pct_meta"] = nucleos["realizado"] / meta_anual * 100 if meta_anual else 0.0
-    nucleos["potencial"] = nucleos["realizado"] + nucleos["pipeline"]
-
-    fatias = nucleos[nucleos["realizado"] > 0][["servico", "realizado"]].copy()
-    if falta > 0:
-        fatias = pd.concat(
-            [fatias, pd.DataFrame([{"servico": "FALTA PARA A META", "realizado": falta}])],
-            ignore_index=True,
-        )
-
-    esquerda, direita = st.columns([1, 1.25])
-    with esquerda:
-        if fatias.empty:
-            st.info("Sem valor realizado no ano.")
-        else:
-            figura = px.pie(
-                fatias,
-                names="servico",
-                values="realizado",
-                color="servico",
-                color_discrete_map=CORES_NUCLEO,
-                hole=0.35,
-            )
-            figura.update_traces(
-                textinfo="percent",
-                sort=False,
-                hovertemplate="%{label}<br>R$ %{value:,.2f}<br>%{percent}<extra></extra>",
-            )
-            figura.update_layout(
-                height=360,
-                margin=dict(t=10, b=10, l=10, r=10),
-                legend=dict(orientation="h", y=-0.08),
-                separators=",.",
-            )
-            st.plotly_chart(figura, width="stretch")
-            st.caption("Base da pizza: meta anual. A fatia cinza é o que falta.")
-
-    with direita:
-        ui.tabela_compacta(
-            nucleos,
-            {
-                "servico": "Núcleo",
-                "ajuizamentos": "Ajuiz.",
-                "realizado": "Realizado (R$)",
-                "pct_realizado": "% do realizado",
-                "pct_meta": "% da meta",
-                "pipeline": "Pipeline (R$)",
-                "potencial": "Realizado + pipeline (R$)",
-            },
-            moedas=["realizado", "pipeline", "potencial"],
-            inteiros=["ajuizamentos"],
-            percentuais=["pct_realizado", "pct_meta"],
-            somar=["ajuizamentos", "realizado", "pipeline", "potencial",
-                   "pct_realizado", "pct_meta"],
-        )
-        st.caption(
-            "Pipeline: clientes com valor e sem ajuizamento, nas etapas do "
-            "cenário selecionado acima."
-        )
 
 
 def _evolucao(ajuizados, meta_anual, meta_mensal, ano) -> None:
@@ -310,63 +211,19 @@ def _evolucao(ajuizados, meta_anual, meta_mensal, ano) -> None:
     )
     st.plotly_chart(figura, width="stretch")
 
-    with st.expander("Tabela da evolução", expanded=False):
-        ui.tabela_compacta(
-            mensal,
+    with st.expander("Tabela da evolução"):
+        ui.tabela(
+            ui.formatar_moedas(
+                mensal, ["honorario_total", "acumulado", "meta_acumulada"]
+            ),
             {
                 "competencia_ajuizamento": "Mês",
-                "honorario_total": "No mês (R$)",
-                "acumulado": "Acumulado (R$)",
-                "meta_acumulada": "Meta acumulada (R$)",
+                "honorario_total": "No mês",
+                "acumulado": "Acumulado",
+                "meta_acumulada": "Meta acumulada",
             },
-            moedas=["honorario_total", "acumulado", "meta_acumulada"],
-            somar=["honorario_total"],
+            "Sem dados.",
         )
-
-def _entrada_no_status(pipeline: pd.DataFrame) -> tuple[pd.Series, object]:
-    """
-    Quando cada cliente entrou no status em que está hoje, pelo log.
-
-    Procura, no log do controle de clientes, a última mudança da coluna
-    STATUS para o valor atual daquela linha. A linha é identificada pelo
-    nome do cliente registrado no log e, na falta dele, pelo número da
-    linha. Sem registro, o status foi definido antes do início do log:
-    devolve vazio e a data do primeiro registro do log, para a tela dizer
-    "desde antes de".
-    """
-    vazio = pd.Series(pd.NaT, index=pipeline.index, dtype="datetime64[ns]")
-    try:
-        logs = modelo.carregar_logs()
-    except Exception:  # noqa: BLE001 - sem log, o simulador segue sem a coluna
-        return vazio, None
-    if logs.empty:
-        return vazio, None
-
-    inicio_log = logs["data_hora"].min()
-    aba = logs["aba_origem"].astype(str).map(normalizar_texto)
-    campo = logs["cabecalho"].astype(str).map(normalizar_texto)
-    mudancas = logs[aba.str.contains("CLIENTE", na=False) & campo.eq("STATUS")].copy()
-    if mudancas.empty:
-        return vazio, inicio_log
-
-    mudancas["status_n"] = mudancas["valor_novo"].astype(str).map(normalizar_texto)
-    mudancas["nome_n"] = mudancas["cliente_autor"].astype(str).map(normalizar_texto)
-    mudancas["linha_n"] = pd.to_numeric(mudancas["linha"], errors="coerce")
-    por_nome = mudancas[mudancas["nome_n"] != ""].groupby(["nome_n", "status_n"])["data_hora"].max()
-    por_linha = mudancas.groupby(["linha_n", "status_n"])["data_hora"].max()
-
-    datas = []
-    for _, linha in pipeline.iterrows():
-        status = normalizar_texto(linha["status"])
-        chave_nome = (normalizar_texto(linha["cliente"]), status)
-        chave_linha = (pd.to_numeric(linha.get("linha_origem"), errors="coerce"), status)
-        if chave_nome in por_nome.index:
-            datas.append(por_nome[chave_nome])
-        elif chave_linha in por_linha.index:
-            datas.append(por_linha[chave_linha])
-        else:
-            datas.append(pd.NaT)
-    return pd.Series(pd.to_datetime(datas), index=pipeline.index), inicio_log
 
 
 def _simulador(pipeline: pd.DataFrame, falta: float) -> None:
@@ -397,26 +254,6 @@ def _simulador(pipeline: pd.DataFrame, falta: float) -> None:
         return
 
     ordenado = pipeline.sort_values("honorario_total", ascending=False).copy()
-    # Dias corridos desde a assinatura do contrato até hoje: quanto tempo
-    # o cliente já espera pelo protocolo. Sem data de contrato, fica vazio.
-    hoje = pd.Timestamp.today().normalize()
-    ordenado["dias_parado"] = (
-        hoje - pd.to_datetime(ordenado["data_contrato"], errors="coerce")
-    ).dt.days.astype("Int64")
-    ordenado["data_contrato_txt"] = pd.to_datetime(
-        ordenado["data_contrato"], errors="coerce"
-    ).dt.strftime("%d/%m/%Y").fillna("—")
-
-    entrada, inicio_log = _entrada_no_status(ordenado)
-    ordenado["dias_status"] = (hoje - entrada.dt.normalize()).dt.days.astype("Int64")
-    antes_do_log = (
-        f"antes de {pd.Timestamp(inicio_log).strftime('%d/%m/%Y')}"
-        if inicio_log is not None and pd.notna(inicio_log) else "sem registro"
-    )
-    ordenado["status_desde"] = entrada.dt.strftime("%d/%m/%Y").fillna(antes_do_log)
-    ordenado["dias_status_txt"] = ordenado["dias_status"].map(
-        lambda v: "—" if pd.isna(v) else str(int(v))
-    )
     ordenado["rotulo"] = (
         ordenado["cliente"].astype(str)
         + " — "
@@ -442,26 +279,11 @@ def _simulador(pipeline: pd.DataFrame, falta: float) -> None:
             "valor, a diferença é coberta. Ajuste a seleção como quiser."
         )
 
-    # A seleção é refeita com a sugestão sempre que o filtro muda. Antes,
-    # o Streamlit guardava a seleção do filtro anterior; com o filtro novo
-    # aqueles clientes deixavam de existir nas opções e a seleção ficava
-    # vazia, zerando o valor.
-    opcoes = ordenado["rotulo"].tolist()
-    assinatura = (tuple(sorted(status)), busca.strip().upper(), len(opcoes), round(falta, 2))
-    if st.session_state.get("sim_assinatura") != assinatura:
-        st.session_state["sim_assinatura"] = assinatura
-        st.session_state["meta_simulacao"] = sugeridos
-    else:
-        # Mantém só o que ainda existe nas opções.
-        st.session_state["meta_simulacao"] = [
-            r for r in st.session_state.get("meta_simulacao", []) if r in opcoes
-        ]
-
     escolhidos = st.multiselect(
         "Clientes a protocolar",
-        opcoes,
+        ordenado["rotulo"].tolist(),
+        default=sugeridos,
         key="meta_simulacao",
-        placeholder="Escolha os clientes",
     )
 
     selecionados = ordenado[ordenado["rotulo"].isin(escolhidos)]
@@ -489,41 +311,20 @@ def _simulador(pipeline: pd.DataFrame, falta: float) -> None:
             "os clientes selecionados."
         )
 
-    tabela = selecionados if not selecionados.empty else ordenado.head(30)
-    ui.tabela_compacta(
-        tabela,
+    ui.tabela(
+        ui.formatar_moedas(
+            selecionados if not selecionados.empty else ordenado.head(30),
+            ["honorario_total"],
+        ),
         {
             "cliente": "Cliente",
             "servico": "Serviço",
             "status": "Status",
             "responsavel": "Responsável",
-            "data_contrato_txt": "Contrato",
-            "dias_parado": "Dias desde o contrato",
-            "status_desde": "No status atual desde",
-            "dias_status_txt": "Dias no status atual",
-            "honorario_total": "Honorários previstos (R$)",
-            "link_bitrix": "Bitrix",
+            "honorario_total": "Honorários previstos",
             "linha_origem": "Linha",
         },
-        moedas=["honorario_total"],
-        inteiros=["dias_parado"],
-        alinhar_direita=["dias_status_txt"],
-        somar=["honorario_total"],
-        valores_total={
-            "dias_parado": tabela["dias_parado"].mean(),
-            "dias_status_txt": (
-                "—" if tabela["dias_status"].isna().all()
-                else str(int(round(tabela["dias_status"].mean())))
-            ),
-        },
-        vazio="Sem clientes aguardando protocolo.",
-    )
-    st.caption(
-        "Dias desde o contrato: dias corridos entre a data do contrato e hoje. "
-        "No status atual desde: a última vez que o STATUS da linha foi mudado para "
-        "o valor de hoje (MINUTA, por exemplo), segundo o log de alterações. "
-        "\"Antes de\" indica que a mudança é anterior ao início do log. Na linha "
-        "de total, as médias de dias entre os clientes listados."
+        "Sem clientes aguardando protocolo.",
     )
 
 
@@ -550,20 +351,43 @@ def painel(clientes: pd.DataFrame) -> None:
     # FILTRADOS: a carteira inteira do recorte, incluindo quem ainda
     # não foi protocolado. O filtro de data preserva de propósito quem
     # não tem data, senão minuta e checklist sumiriam da tela.
-    ajuizados = filtrados[filtrados["ajuizado"]]
+    # Critério do realizado. O padrão é a Data do Ajuizamento, que é
+    # como o DASH CLIENTES calcula, e ignora o status. Isso inclui quem
+    # tem data lançada mas ficou com status PROTOCOLAR, seja porque a
+    # data foi preenchida antes do protocolo, seja porque o status não
+    # foi atualizado depois dele.
+    incluir_pendentes = st.checkbox(
+        "Incluir também quem tem data de ajuizamento mas status pendente",
+        value=False,
+        key="fin_incluir_pendentes",
+        help=(
+            "Desmarcado, o realizado conta apenas status Protocolado. "
+            "Marcado, reproduz o critério do dashboard do Google Sheets, "
+            "que considera qualquer cliente com Data do Ajuizamento."
+        ),
+    )
+
+    com_data = filtrados[filtrados["ajuizado"]]
+    protocolados = filtrados[filtrados["protocolado"]]
+    divergentes = com_data[~com_data.index.isin(protocolados.index)]
+
+    ajuizados = com_data if incluir_pendentes else protocolados
     realizado = ajuizados["honorario_total"].sum()
     carteira = filtrados["honorario_total"].sum()
     media = realizado / len(ajuizados) if len(ajuizados) else 0
 
     colunas = st.columns(4)
-    ui.cartao(colunas[0], "Ajuizamentos no período", len(ajuizados))
     ui.cartao(
-        colunas[1], "Honorários dos ajuizamentos", formatar_moeda(realizado),
-        "Soma apenas dos clientes com Data do Ajuizamento no período.",
+        colunas[0], "Protocolados no período", len(ajuizados),
+        "Status Protocolado e Data do Ajuizamento dentro do período.",
     )
     ui.cartao(
-        colunas[2], "Média por ajuizamento", formatar_moeda(media),
-        "Honorários dos ajuizamentos dividido pela quantidade de ajuizamentos.",
+        colunas[1], "Honorários protocolados", formatar_moeda(realizado),
+        "Soma dos clientes protocolados com data dentro do período.",
+    )
+    ui.cartao(
+        colunas[2], "Média por protocolo", formatar_moeda(media),
+        "Honorários protocolados dividido pela quantidade de protocolos.",
     )
     ui.cartao(
         colunas[3], "Previsto na carteira", formatar_moeda(carteira),
@@ -572,13 +396,24 @@ def painel(clientes: pd.DataFrame) -> None:
         "anteriores ao protocolo.",
     )
 
+    if not divergentes.empty:
+        etapas = ", ".join(sorted(divergentes["status"].dropna().unique()))
+        st.caption(
+            f"Atenção ao cadastro: {len(divergentes)} cliente(s) têm Data do "
+            f"Ajuizamento preenchida mas status diferente de Protocolado "
+            f"({etapas}), somando "
+            f"{formatar_moeda(divergentes['honorario_total'].sum())}. "
+            "Estão fora dos números acima enquanto a caixa estiver "
+            "desmarcada, e devem ser corrigidos na planilha."
+        )
+
     colunas = st.columns(3)
     ui.cartao(
-        colunas[0], "Contratuais dos ajuizamentos",
+        colunas[0], "Contratuais protocolados",
         formatar_moeda(ajuizados["honorario_previsto"].sum()),
     )
     ui.cartao(
-        colunas[1], "Sucumbenciais dos ajuizamentos",
+        colunas[1], "Sucumbenciais protocolados",
         formatar_moeda(ajuizados["honorario_sucumbencial"].sum()),
     )
     dias = filtrados["dias_contrato_ajuizamento"].dropna()
@@ -589,7 +424,7 @@ def painel(clientes: pd.DataFrame) -> None:
         f"Calculada sobre {len(dias)} caso(s) com as duas datas.",
     )
 
-    base = filtrados.dropna(subset=["data_ajuizamento"]).copy()
+    base = ajuizados.dropna(subset=["data_ajuizamento"]).copy()
 
     esquerda, direita = st.columns(2)
     with esquerda:
@@ -619,20 +454,24 @@ def painel(clientes: pd.DataFrame) -> None:
         por_responsavel = por_responsavel.sort_values(
             "honorario_total", ascending=False
         )
-        ui.tabela_compacta(
-            por_responsavel,
-            {
-                "responsavel": "Responsável",
-                "clientes": "Clientes",
-                "carteira": "Carteira (R$)",
-                "ajuizamentos": "Ajuizados",
-                "honorario_total": "Ajuizado (R$)",
-                "media": "Média (R$)",
-            },
-            moedas=["carteira", "honorario_total", "media"],
-            inteiros=["clientes", "ajuizamentos"],
-            somar=["clientes", "carteira", "ajuizamentos", "honorario_total"],
-            medias={"media": ("honorario_total", "ajuizamentos")},
+        colunas_valor = ui.remover_colunas_vazias(
+            por_responsavel, ["carteira", "honorario_total", "media"]
+        )
+        rotulos = {
+            "responsavel": "Responsável",
+            "clientes": "Clientes",
+            "ajuizamentos": "Protocolados",
+        }
+        nomes = {
+            "carteira": "Carteira",
+            "honorario_total": "Ajuizado",
+            "media": "Média",
+        }
+        rotulos.update({c: nomes[c] for c in colunas_valor})
+        ui.tabela(
+            ui.formatar_moedas(por_responsavel, colunas_valor),
+            rotulos,
+            "Sem dados no filtro.",
         )
 
     with direita:
@@ -647,32 +486,53 @@ def painel(clientes: pd.DataFrame) -> None:
             .reset_index()
             .sort_values("honorario_total", ascending=False)
         )
-        ui.tabela_compacta(
-            por_status,
+        ui.tabela(
+            ui.formatar_moedas(por_status, ["honorario_total"]),
             {
                 "status": "Status",
                 "clientes": "Quantidade",
-                "honorario_total": "Previsto (R$)",
+                "honorario_total": "Previsto",
             },
-            moedas=["honorario_total"],
-            inteiros=["clientes"],
+            "Sem dados no filtro.",
         )
+
+    if not divergentes.empty:
+        with st.expander(
+            f"Clientes com data de ajuizamento e status pendente ({len(divergentes)})"
+        ):
+            ui.tabela(
+                ui.formatar_moedas(
+                    ui.formatar_datas(divergentes, ["data_ajuizamento"]),
+                    ["honorario_total"],
+                ),
+                {
+                    "cliente": "Cliente",
+                    "status": "Status",
+                    "responsavel": "Responsável",
+                    "data_ajuizamento": "Data do ajuizamento",
+                    "honorario_total": "Previsto",
+                    "linha_origem": "Linha",
+                },
+                "Sem divergências.",
+            )
 
     if base.empty:
         return
 
     st.markdown("#### Honorários por mês e por serviço")
-    st.caption("Valores em R$, sem abreviação.")
-    ui.matriz_com_total(
+    st.caption("Valores abreviados: mi para milhão, mil para milhar.")
+    matriz = ui.matriz_compacta(
         base, "competencia_ajuizamento", "servico", "honorario_total", "Mês"
     )
+    st.dataframe(matriz, width="stretch", hide_index=True)
 
-    st.markdown("#### Ajuizamentos por mês e por responsável")
-    ui.matriz_com_total(
+    st.markdown("#### Protocolos por mês e por responsável")
+    matriz = ui.matriz_compacta(
         base,
         "competencia_ajuizamento",
         "responsavel",
-        "ajuizado",
+        "protocolado",
         "Mês",
         formato="inteiro",
     )
+    st.dataframe(matriz, width="stretch", hide_index=True)

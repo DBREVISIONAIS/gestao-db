@@ -21,7 +21,6 @@ from db.normalizacao import (
     extrair_resultados_processuais,
     classificar_tipo_prazo,
     converter_data,
-    converter_data_segura,
     converter_numero,
     converter_percentual,
     diferenca_dias,
@@ -42,7 +41,6 @@ ABA_CLIENTES = "BI_CLIENTES"
 ABA_LOG = "LOG_ALTERACOES"
 ABA_BASE_IDS = "BI_BASE_IDS"
 ABA_CONTROLE = "CONTROLE_BI"
-ABA_DE_PARA = "DE_PARA"
 
 STATUS_ENCERRADOS_PRAZOS = {"PROTOCOLADO", "CONCLUIDO", "OK"}
 STATUS_ENCERRADOS_CLIENTES = {"PROTOCOLADO", "DESCARTADO", "CONCLUIDO"}
@@ -142,8 +140,8 @@ def carregar_prazos() -> pd.DataFrame:
         # Data de controle: Prazo Fatal e, na ausencia dele, Data Final.
         # Mesma regra do DASH PRAZOS. Sem esse fallback, milhares de
         # registros ficariam fora da contagem operacional.
-        fatal = converter_data_segura(prazo_fatal)
-        final = converter_data_segura(data_final)
+        fatal = converter_data(prazo_fatal)
+        final = converter_data(data_final)
 
         # O campo FATAL nem sempre traz data. Ele também recebe texto,
         # e AGUARDA é uma situação declarada de propósito, diferente de
@@ -168,7 +166,7 @@ def carregar_prazos() -> pd.DataFrame:
 
         situacao, dias_para_fatal = _situacao_prazo(data_controle, encerrado, hoje)
         resultados = extrair_resultados_processuais(conteudo, observacao)
-        data_referencia = converter_data_segura(
+        data_referencia = converter_data(
             primeiro_preenchido([data_evento, prazo_fatal, data_final])
         )
 
@@ -177,10 +175,10 @@ def carregar_prazos() -> pd.DataFrame:
                 "linha_origem": indice,
                 "autor": str(autor).strip(),
                 "link_bitrix": valor_por_cabecalho(linha, mapa, ["LINK BITRIX"]),
-                "data_evento": converter_data_segura(data_evento),
+                "data_evento": converter_data(data_evento),
                 "prazo_texto": valor_por_cabecalho(linha, mapa, ["PRAZO"]),
-                "data_final": converter_data_segura(data_final),
-                "prazo_fatal": converter_data_segura(prazo_fatal),
+                "data_final": converter_data(data_final),
+                "prazo_fatal": converter_data(prazo_fatal),
                 "conteudo": str(conteudo).strip(),
                 "observacao": str(observacao).strip(),
                 "responsavel": str(responsavel).strip() or "SEM RESPONSÁVEL",
@@ -318,7 +316,7 @@ def carregar_clientes() -> pd.DataFrame:
             ]
         )
         sentenca = valor_por_cabecalho(linha, mapa, ["SENTENCA PROCEDENTE"])
-        data_referencia = converter_data_segura(
+        data_referencia = converter_data(
             primeiro_preenchido([data_ajuizamento, data_contrato])
         )
 
@@ -333,8 +331,8 @@ def carregar_clientes() -> pd.DataFrame:
                 ).strip()
                 or "SEM RESPONSÁVEL",
                 "link_bitrix": valor_por_cabecalho(linha, mapa, ["LINK BITRIX"]),
-                "data_contrato": converter_data_segura(data_contrato),
-                "data_ajuizamento": converter_data_segura(data_ajuizamento),
+                "data_contrato": converter_data(data_contrato),
+                "data_ajuizamento": converter_data(data_ajuizamento),
                 "calculo_real": calculo_real,
                 "percentual_honorarios": converter_percentual(
                     valor_por_cabecalho(
@@ -357,25 +355,25 @@ def carregar_clientes() -> pd.DataFrame:
                 "valor_ajuizado": valor_ajuizado,
                 "tribunal": valor_por_cabecalho(linha, mapa, ["TRIBUNAL AJUIZAMENTO"]),
                 "liminar": valor_por_cabecalho_parcial(linha, mapa, "LIMINAR CONCEDIDA"),
-                "data_primeiro_faturamento": converter_data_segura(
+                "data_primeiro_faturamento": converter_data(
                     valor_por_cabecalho(
                         linha, mapa, ["DATA 1 FATURAMENTO", "DATA PRIMEIRO FATURAMENTO"]
                     )
                 ),
                 "sentenca_procedente": sentenca,
                 "resultado_sentenca": classificar_resultado_sentenca(sentenca),
-                "data_sentenca": converter_data_segura(
+                "data_sentenca": converter_data(
                     valor_por_cabecalho(linha, mapa, ["DATA SENTENCA"])
                 ),
-                "data_transito": converter_data_segura(
+                "data_transito": converter_data(
                     valor_por_cabecalho_parcial(linha, mapa, "DATA TJ PROC CONHECIMENTO")
                 ),
-                "data_faturamento_restituicao": converter_data_segura(
+                "data_faturamento_restituicao": converter_data(
                     valor_por_cabecalho_parcial(
                         linha, mapa, "DATA FATURAMENTO RESTITUICAO"
                     )
                 ),
-                "data_conclusao_execucao": converter_data_segura(
+                "data_conclusao_execucao": converter_data(
                     valor_por_cabecalho_parcial(linha, mapa, "DATA CONCLUSAO EXECUCAO")
                 ),
                 "diagnostico": valor_por_cabecalho(linha, mapa, ["DIAGNOSTICO"]),
@@ -384,7 +382,16 @@ def carregar_clientes() -> pd.DataFrame:
                     data_contrato, data_ajuizamento
                 ),
                 "encerrado": normalizar_texto(status) in STATUS_ENCERRADOS_CLIENTES,
-                "ajuizado": pd.notna(converter_data_segura(data_ajuizamento)),
+                "ajuizado": pd.notna(converter_data(data_ajuizamento)),
+                # Realizado exige as duas coisas: data de ajuizamento,
+                # que situa o caso no mês, e status Protocolado, que
+                # confirma que o protocolo de fato aconteceu. Data
+                # preenchida com status pendente é erro de cadastro,
+                # não é receita realizada.
+                "protocolado": (
+                    pd.notna(converter_data(data_ajuizamento))
+                    and "PROTOCOLAD" in normalizar_texto(status)
+                ),
                 "possui_calculo": valor_preenchido(calculo_real) or valor_ajuizado != 0,
                 "data_referencia": data_referencia,
             }
@@ -510,25 +517,7 @@ def carregar_logs() -> pd.DataFrame:
     if dados.empty:
         return dados
 
-    # Conversão vetorizada nos formatos que o Apps Script grava; só o que
-    # sobrar vai para o conversor linha a linha, que é bem mais lento.
-    texto = dados["data_hora"].astype(str).str.strip()
-    convertido = pd.to_datetime(texto, format="%d/%m/%Y %H:%M:%S", errors="coerce")
-    faltando = convertido.isna()
-    if faltando.any():
-        convertido[faltando] = pd.to_datetime(
-            texto[faltando], format="%d/%m/%Y %H:%M", errors="coerce"
-        )
-        faltando = convertido.isna()
-    if faltando.any():
-        convertido[faltando] = pd.to_datetime(
-            dados.loc[faltando, "data_hora"].apply(converter_data_segura), errors="coerce"
-        )
-    # O pandas 3 aceita datas como o ano 206, que as operações seguintes
-    # não suportam; ano fora de 1900 a 2100 é erro de digitação e vira vazio.
-    fora = convertido.notna() & ~convertido.dt.year.between(1900, 2100)
-    convertido = convertido.mask(fora)
-    dados["data_hora"] = convertido.astype("datetime64[ns]")
+    dados["data_hora"] = dados["data_hora"].apply(converter_data)
     dados["linha"] = pd.to_numeric(dados["linha"], errors="coerce")
     dados = dados.sort_values("data_hora", ascending=False, na_position="last")
     # Identidade do editor: e-mail sempre que existir. A chave anônima
@@ -576,36 +565,6 @@ def carregar_base_ids() -> pd.DataFrame:
     return dados[dados.iloc[:, 0].astype(str).str.strip() != ""].reset_index(drop=True)
 
 
-@st.cache_resource(ttl=conexao.TTL_CACHE, show_spinner=False)
-def carregar_de_para() -> pd.DataFrame:
-    """
-    Correspondência manual de nomes, opcional.
-
-    Aba DE_PARA criada à mão na planilha auxiliar, com duas colunas:
-    NOME NO PRAZO e NOME NO CLIENTE. Serve para os casos que o
-    cruzamento automático não resolve (apelido, nome de solteira,
-    grafia muito diferente). Sem a aba, o painel segue sem ela.
-    """
-    try:
-        matriz = conexao.ler_aba(conexao.id_planilha_auxiliar(), ABA_DE_PARA)
-    except RuntimeError:
-        return pd.DataFrame(columns=["nome_prazo", "nome_cliente"])
-
-    if len(matriz) < 2:
-        return pd.DataFrame(columns=["nome_prazo", "nome_cliente"])
-
-    mapa = mapa_cabecalhos(matriz[0])
-    registros = []
-    for linha in matriz[1:]:
-        prazo = valor_por_cabecalho(linha, mapa, ["NOME NO PRAZO", "PRAZO", "AUTOR"])
-        cliente = valor_por_cabecalho(linha, mapa, ["NOME NO CLIENTE", "CLIENTE"])
-        if valor_preenchido(prazo) and valor_preenchido(cliente):
-            registros.append(
-                {"nome_prazo": str(prazo).strip(), "nome_cliente": str(cliente).strip()}
-            )
-    return pd.DataFrame(registros, columns=["nome_prazo", "nome_cliente"])
-
-
 # ------------------------------------------------- estado do espelho
 
 
@@ -632,7 +591,7 @@ def estado_do_espelho() -> dict:
 
 def minutos_desde_atualizacao(estado: dict) -> float | None:
     """Idade do espelho em minutos, ou None se nao houver registro."""
-    momento = converter_data_segura(estado.get("ATUALIZADO_EM"))
+    momento = converter_data(estado.get("ATUALIZADO_EM"))
     if pd.isna(momento):
         return None
     return (datetime.now() - momento).total_seconds() / 60.0

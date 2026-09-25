@@ -143,7 +143,15 @@ def painel(prazos: pd.DataFrame, logs: pd.DataFrame) -> None:
     st.plotly_chart(figura, width="stretch")
 
     st.markdown("#### Resumo por editor e tipo de evento")
-    ui.matriz_com_total(
-        identificados, "editor", "tipo_evento", "id", "Editor",
-        formato="inteiro", aggfunc="count",
+    tabela_resumo = (
+        identificados.pivot_table(
+            index="editor",
+            columns="tipo_evento",
+            values="id",
+            aggfunc="count",
+            fill_value=0,
+        )
+        .reset_index()
+        .rename(columns={"editor": "Editor"})
     )
+    st.dataframe(tabela_resumo, width="stretch", hide_index=True)

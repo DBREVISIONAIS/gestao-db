@@ -29,12 +29,9 @@ import streamlit as st
 # quando o app e executado a partir de outro diretorio de trabalho.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from db import auth, bitrix, conexao, modelo  # noqa: E402
+from db import auth, conexao, modelo  # noqa: E402
 from paginas import (
     clientes,
-    controladoria,
-    cruzamento,
-    inicio,
     financeiro,
     historico,
     logs,
@@ -185,17 +182,6 @@ def aplicar_identidade_visual() -> None:
 
         /* Navegação e botões */
         div[data-testid="stSegmentedControl"] button {{ font-weight: 600; }}
-        /* Barra de páginas mais compacta, para caber numa linha. */
-        div[data-testid="stSegmentedControl"] button {{
-            padding: 0.3rem 0.75rem !important;
-            font-size: 0.86rem !important;
-            min-height: 2.1rem !important;
-        }}
-        /* Botões só com ícone (Atualizar e Sair): quadrados e discretos. */
-        .st-key-botao_atualizar button, .st-key-botao_sair button {{
-            padding: 0.3rem 0.55rem !important;
-            min-height: 2.1rem !important;
-        }}
         .stButton button {{
             border-radius: 6px;
             font-weight: 600;
@@ -217,56 +203,6 @@ def aplicar_identidade_visual() -> None:
         div[data-testid="stExpander"] {{
             border: 1px solid #E3E9F0;
             border-radius: 6px;
-        }}
-
-        /* Tabelas-resumo compactas: largura do conteúdo, número cheio
-           alinhado à direita e linha de total destacada. O !important
-           vence o estilo que o Streamlit aplica a tabelas em markdown. */
-        .tab-db-wrap {{ overflow-x: auto; margin: 2px 0 14px 0; }}
-        .tab-db {{
-            border-collapse: collapse !important;
-            width: auto !important;
-            font-size: 0.84rem !important;
-            border: 1px solid #E3E9F0 !important;
-        }}
-        .tab-db th {{
-            background: {PALETA["CINZA_FUNDO"]} !important;
-            color: {PALETA["CINZA_TEXTO"]} !important;
-            font-weight: 600 !important;
-            font-size: 0.70rem !important;
-            text-transform: uppercase;
-            letter-spacing: 0.04em;
-            padding: 6px 12px !important;
-            border: none !important;
-            border-bottom: 1px solid #D9E1EA !important;
-            text-align: left !important;
-            white-space: nowrap;
-        }}
-        .tab-db td {{
-            padding: 4px 12px !important;
-            border: none !important;
-            border-bottom: 1px solid #EEF2F7 !important;
-            color: {PALETA["AZUL_ESCURO"]} !important;
-            white-space: nowrap;
-        }}
-        .tab-db .num {{
-            text-align: right !important;
-            font-variant-numeric: tabular-nums;
-        }}
-        .tab-db .col-total {{ font-weight: 700; background: #F7F9FC !important; }}
-        .tab-db tr.total td {{
-            font-weight: 700 !important;
-            background: #EEF3F8 !important;
-            border-top: 2px solid {PALETA["AZUL_ESCURO"]} !important;
-        }}
-        .linha-total {{
-            font-size: 0.82rem;
-            font-weight: 700;
-            color: {PALETA["AZUL_ESCURO"]};
-            background: #EEF3F8;
-            border-top: 2px solid {PALETA["AZUL_ESCURO"]};
-            padding: 6px 12px;
-            margin: -6px 0 12px 0;
         }}
         </style>
         """,
@@ -291,15 +227,12 @@ aplicar_identidade_visual()
 # Cada pagina declara de quais fontes precisa. Evita carregar o log em
 # telas que nao o utilizam.
 FONTES_POR_PAGINA = {
-    "Início": (),
     "Visão geral": ("prazos", "clientes"),
     "Prazos": ("prazos",),
     "Clientes": ("clientes",),
-    "Clientes e processos": ("clientes",),
     "Financeiro": ("clientes",),
     "Resultados": ("resultados",),
     "Produção": ("prazos", "logs"),
-    "Controladoria": ("prazos", "logs"),
     "Logs e ciclos": ("logs", "clientes"),
     "Histórico e auditoria": ("logs", "ids"),
 }
@@ -318,8 +251,6 @@ def limpar_tudo() -> None:
     for carregador in CARREGADORES.values():
         carregador.clear()
     modelo.estado_do_espelho.clear()
-    modelo.carregar_de_para.clear()
-    bitrix.limpar_cache()
 
 
 def barra_superior(usuario: dict) -> str:
@@ -332,32 +263,24 @@ def barra_superior(usuario: dict) -> str:
     """
     paginas = auth.regras_atuais()["paginas"]
 
-    # Botões estreitos, só com ícone e o tamanho do conteúdo, para a barra
-    # de páginas ficar com quase toda a largura e não ser cortada.
-    navegacao, acoes = st.columns([14, 1.4], vertical_alignment="center")
+    navegacao, atualizar, sair = st.columns([8, 1.3, 1])
 
     with navegacao:
         pagina = st.segmented_control(
             "Painel",
             paginas,
-            # Com a página já definida no estado (login, cartão do Início),
-            # passar default também gera aviso do Streamlit.
-            default=None if "pagina_atual" in st.session_state else paginas[0],
+            default=st.session_state.get("pagina_atual") or paginas[0],
             key="pagina_atual",
             label_visibility="collapsed",
         )
-    with acoes:
-        atualizar, sair = st.columns(2, gap="small")
-        with atualizar:
-            if st.button("", icon=":material/refresh:", help="Atualizar os dados agora",
-                         key="botao_atualizar", width="content"):
-                limpar_tudo()
-                st.rerun()
-        with sair:
-            if st.button("", icon=":material/logout:", help="Sair do painel",
-                         key="botao_sair", width="content"):
-                st.session_state.clear()
-                st.rerun()
+    with atualizar:
+        if st.button("Atualizar", width="stretch"):
+            limpar_tudo()
+            st.rerun()
+    with sair:
+        if st.button("Sair", width="stretch"):
+            st.session_state.clear()
+            st.rerun()
 
     return pagina or paginas[0]
 
@@ -423,11 +346,7 @@ def main() -> None:
     usuario = auth.usuario_logado()
     if not usuario:
         cabecalho("Painel de gestão · acesso restrito")
-        _, centro, _ = st.columns([1, 1.2, 1])
-        with centro:
-            auth.tela_de_login()
-        st.markdown("#### Sistemas do escritório")
-        inicio.cartoes(logado=False)
+        auth.tela_de_login()
         return
 
     # O cabecalho vem antes do carregamento de proposito: se a leitura
@@ -436,12 +355,8 @@ def main() -> None:
     cabecalho(f"Painel de gestão · {usuario['nome']}")
 
     pagina = barra_superior(usuario)
-
-    if pagina == "Início":
-        inicio.render(usuario)
-        return
-
     _estado_do_espelho()
+
     dados = carregar(pagina)
 
     if pagina == "Visão geral":
@@ -450,14 +365,10 @@ def main() -> None:
         prazos.render(dados["prazos"])
     elif pagina == "Clientes":
         clientes.render(dados["clientes"])
-    elif pagina == "Clientes e processos":
-        cruzamento.render(dados["clientes"])
     elif pagina == "Financeiro":
         financeiro.render(dados["clientes"])
     elif pagina == "Resultados":
         resultados.render(dados["resultados"])
-    elif pagina == "Controladoria":
-        controladoria.render(dados["prazos"], dados["logs"])
     elif pagina == "Produção":
         producao.render(dados["prazos"], dados["logs"])
     elif pagina == "Logs e ciclos":
