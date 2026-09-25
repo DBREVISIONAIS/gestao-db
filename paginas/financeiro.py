@@ -188,7 +188,7 @@ def metas(clientes: pd.DataFrame) -> None:
         )
 
     _evolucao(ajuizados, meta_anual, meta_mensal, ano)
-    _simulador(pipeline, falta)
+    _simulador(disponivel, falta, cenario)
 
 
 def _evolucao(ajuizados, meta_anual, meta_mensal, ano) -> None:
@@ -257,27 +257,42 @@ def _evolucao(ajuizados, meta_anual, meta_mensal, ano) -> None:
         )
 
 
-def _simulador(pipeline: pd.DataFrame, falta: float) -> None:
+def _simulador(disponivel: pd.DataFrame, falta: float, cenario: list) -> None:
+    """
+    Simulador de protocolo.
+
+    Recebe a base inteira de clientes com valor aguardando protocolo,
+    e não apenas o cenário escolhido na meta. O cenário entra só como
+    seleção inicial do filtro de status: quem quiser olhar checklist ou
+    pré-descarte consegue, sem ter que voltar e mexer na meta.
+    """
     st.markdown("#### Simulador de protocolo")
 
-    if pipeline.empty:
+    if disponivel.empty:
         st.info("Nenhum cliente com valor previsto aguardando protocolo.")
         return
+
+    todos_status = sorted(disponivel["status"].dropna().unique())
+    if "sim_status" not in st.session_state:
+        st.session_state["sim_status"] = [e for e in cenario if e in todos_status]
 
     filtros = st.columns([1.2, 2])
     with filtros[0]:
         status = st.multiselect(
             "Filtrar por status",
-            sorted(pipeline["status"].dropna().unique()),
-            default=[],
+            todos_status,
             key="sim_status",
+            help=(
+                "Começa com as etapas do cenário da meta. Acrescente ou "
+                "remova livremente para simular outros conjuntos."
+            ),
         )
     with filtros[1]:
         busca = st.text_input(
             "Filtrar por cliente", placeholder="parte do nome", key="sim_busca"
         )
 
-    pipeline = ui.aplicar_multiselecao(pipeline, "status", status)
+    pipeline = ui.aplicar_multiselecao(disponivel, "status", status)
     pipeline = ui.busca_texto(pipeline, ["cliente"], busca)
 
     if pipeline.empty:
