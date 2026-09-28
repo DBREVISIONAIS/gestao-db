@@ -120,6 +120,23 @@ def converter_data(valor):
     return convertido if pd.notna(convertido) else pd.NaT
 
 
+def converter_data_segura(valor):
+    """
+    Como converter_data, mas descarta ano fora de 1900 a 2100.
+
+    Ano digitado errado na planilha ("15/10/0206", "15/10/20266") gera
+    data que o pandas não consegue guardar e derrubava a página inteira.
+    Aqui ela vira data vazia, como qualquer outro valor inválido.
+    """
+    data = converter_data(valor)
+    try:
+        if pd.isna(data) or not 1900 <= data.year <= 2100:
+            return pd.NaT
+    except (AttributeError, TypeError, ValueError):
+        return pd.NaT
+    return data
+
+
 def inicio_do_dia(valor):
     data = converter_data(valor)
     if pd.isna(data):

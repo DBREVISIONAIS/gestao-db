@@ -23,12 +23,15 @@ import pandas as pd
 import streamlit as st
 
 PAGINAS_DISPONIVEIS = (
+    "Início",
     "Visão geral",
     "Prazos",
     "Clientes",
+    "Clientes e processos",
     "Financeiro",
     "Resultados",
     "Produção",
+    "Controladoria",
     "Logs e ciclos",
     "Histórico e auditoria",
 )
@@ -112,8 +115,9 @@ def regras_do_perfil(perfil: str) -> dict:
 
     configuracao = dict(configuracao)
     paginas = configuracao.get("paginas") or list(PAGINAS_DISPONIVEIS)
+    # Início aparece para todo perfil: é só a porta de entrada, sem dados.
     return {
-        "paginas": [p for p in PAGINAS_DISPONIVEIS if p in paginas],
+        "paginas": [p for p in PAGINAS_DISPONIVEIS if p in paginas or p == "Início"],
         "somente_proprios": bool(configuracao.get("somente_proprios", False)),
         "ver_financeiro": bool(configuracao.get("ver_financeiro", True)),
         "ver_editor": bool(configuracao.get("ver_editor", True)),
@@ -126,7 +130,104 @@ def usuario_logado() -> dict | None:
 
 def regras_atuais() -> dict:
     usuario = usuario_logado()
-    return regras_do_perfil(usuario["perfil"]) if usuario else dict(PERFIL_TOTAL)
+    regras = regras_do_perfil(usuario["perfil"]) if usuario else dict(PERFIL_TOTAL)
+    # Valores de honorários só aparecem com a área de gestão liberada,
+    # inclusive nas páginas abertas (Visão geral, Clientes e processos).
+    regras["ver_financeiro"] = regras["ver_financeiro"] and gestao_liberada()
+    return regras
+
+
+# ------------------------------------------------------ área de gestão
+#
+# Segunda senha, pedida só para as páginas de gestão. Quem entra com a
+# senha geral vê prazos, controladoria e o Início; as páginas de gestão
+# aparecem na barra com cadeado e pedem a SENHA_GESTAO na primeira vez.
+# Liberada, a área fica aberta até a pessoa clicar em Sair.
+#
+# Secrets:
+#   SENHA_GESTAO = "hash SHA-256 (gerar_hash.py)"
+#   PAGINAS_GESTAO = ["Clientes", "Financeiro", ...]   (opcional)
+#
+# Sem SENHA_GESTAO configurada, as páginas de gestão ficam fechadas para
+# todos: é mais seguro falhar fechado do que abrir por esquecimento.
+# No modo por usuário, o perfil com gestao = true entra sem a segunda senha.
+
+PAGINAS_GESTAO_PADRAO = (
+    "Clientes",
+    "Financeiro",
+    "Resultados",
+    "Produção",
+    "Logs e ciclos",
+    "Histórico e auditoria",
+)
+TENTATIVAS_MAXIMAS = 5
+BLOQUEIO_MINUTOS = 5
+
+
+def paginas_gestao() -> tuple:
+    try:
+        configuradas = st.secrets.get("PAGINAS_GESTAO")
+    except Exception:  # noqa: BLE001
+        configuradas = None
+    return tuple(configuradas) if configuradas else PAGINAS_GESTAO_PADRAO
+
+
+def _perfil_com_gestao() -> bool:
+    usuario = usuario_logado()
+    if not usuario or modo_senha_unica():
+        return False
+    configuracao = dict(_perfis().get(usuario["perfil"], {}) or {})
+    return bool(configuracao.get("gestao", False))
+
+
+def gestao_liberada() -> bool:
+    return bool(st.session_state.get("gestao_liberada")) or _perfil_com_gestao()
+
+
+def pagina_protegida(pagina: str) -> bool:
+    return pagina in paginas_gestao() and not gestao_liberada()
+
+
+def tela_senha_gestao(pagina: str) -> None:
+    """Formulário da senha de gestão, com limite de tentativas por sessão."""
+    import time
+
+    st.subheader(pagina)
+    guardada = str(st.secrets.get("SENHA_GESTAO", "") or "")
+    if not guardada:
+        st.warning(
+            "Esta página faz parte da área de gestão, que ainda não tem senha "
+            "configurada. Peça ao administrador para incluir SENHA_GESTAO nos Secrets."
+        )
+        return
+
+    bloqueado_ate = st.session_state.get("gestao_bloqueio_ate", 0)
+    if time.time() < bloqueado_ate:
+        restante = int((bloqueado_ate - time.time()) // 60) + 1
+        st.error(f"Muitas tentativas erradas. Tente de novo em {restante} min.")
+        return
+
+    _, centro, _ = st.columns([1, 1.2, 1])
+    with centro:
+        st.info("Área de gestão. Digite a senha de gestão para continuar.",
+                icon=":material/lock:")
+        with st.form("senha_gestao"):
+            senha = st.text_input("Senha de gestão", type="password")
+            entrar = st.form_submit_button("Liberar", width="stretch")
+        if not entrar:
+            return
+        if _confere(senha, guardada):
+            st.session_state["gestao_liberada"] = True
+            st.session_state.pop("gestao_tentativas", None)
+            st.rerun()
+        tentativas = st.session_state.get("gestao_tentativas", 0) + 1
+        st.session_state["gestao_tentativas"] = tentativas
+        if tentativas >= TENTATIVAS_MAXIMAS:
+            st.session_state["gestao_bloqueio_ate"] = time.time() + BLOQUEIO_MINUTOS * 60
+            st.session_state["gestao_tentativas"] = 0
+            st.error(f"Senha incorreta. Acesso bloqueado por {BLOQUEIO_MINUTOS} min.")
+        else:
+            st.error(f"Senha incorreta. Tentativa {tentativas} de {TENTATIVAS_MAXIMAS}.")
 
 
 def tela_de_login() -> None:
@@ -145,6 +246,7 @@ def tela_de_login() -> None:
     usuario = autenticar(login, senha)
     if usuario:
         st.session_state["usuario"] = usuario
+        st.session_state["pagina_atual"] = "Início"
         st.rerun()
     else:
         st.error("Senha inválida." if unica else "Usuário ou senha inválidos.")
