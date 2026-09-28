@@ -278,6 +278,7 @@ def tabela_compacta(
     vazio: str = "Sem dados no filtro.",
     valores_total: dict | None = None,
     alinhar_direita: list[str] | tuple = (),
+    rotulo_total: str = "TOTAL",
 ) -> None:
     """
     Tabela-resumo enxuta, em HTML.
@@ -301,7 +302,7 @@ def tabela_compacta(
     if total:
         if somar is None:
             somar = [c for c in list(moedas) + list(inteiros) if c in base.columns]
-        base = adicionar_total(base, primeira, somar, medias)
+        base = adicionar_total(base, primeira, somar, medias, rotulo=rotulo_total)
         # Valor pronto para a linha de total, quando não é soma nem razão
         # (por exemplo, a média simples de uma coluna de dias).
         for coluna, valor in (valores_total or {}).items():
@@ -361,6 +362,23 @@ def tabela_compacta(
         f"<tbody>{''.join(linhas)}</tbody></table></div>"
     )
     st.markdown(html, unsafe_allow_html=True)
+
+
+def limitar_com_demais(
+    dados: pd.DataFrame, limite: int, coluna_rotulo: str, somar: list[str]
+) -> pd.DataFrame:
+    """
+    Mantém as primeiras linhas e junta o resto numa linha DEMAIS, para a
+    linha de total continuar sendo o total de tudo, e não só do que aparece.
+    """
+    if len(dados) <= limite:
+        return dados
+    resto = dados.iloc[limite:]
+    linha = {c: pd.NA for c in dados.columns}
+    linha[coluna_rotulo] = f"DEMAIS ({len(resto)})"
+    for coluna in somar:
+        linha[coluna] = pd.to_numeric(resto[coluna], errors="coerce").sum()
+    return pd.concat([dados.iloc[:limite], pd.DataFrame([linha])], ignore_index=True)
 
 
 def matriz_com_total(

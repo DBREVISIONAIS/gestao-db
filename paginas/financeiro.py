@@ -82,9 +82,16 @@ def metas(clientes: pd.DataFrame) -> None:
             help="Serve só de linha de comparação. O que fecha o ano é a meta anual.",
         )
 
+    # Realizado: só o que está protocolado de fato (ver modelo.py). Quem tem
+    # data de ajuizamento mas status PROTOCOLAR ou outro pendente fica fora
+    # e aparece no aviso logo abaixo, para corrigir na planilha.
     ajuizados = clientes[
-        clientes["ajuizado"] & (clientes["ano_ajuizamento"] == ano)
+        clientes["protocolado"] & (clientes["ano_ajuizamento"] == ano)
     ].copy()
+    pendentes = clientes[
+        clientes["ajuizado"] & ~clientes["protocolado"] & ~clientes["encerrado"]
+        & (clientes["ano_ajuizamento"] == ano)
+    ]
     realizado = float(ajuizados["honorario_total"].sum())
     falta = max(meta_anual - realizado, 0.0)
     percentual = (realizado / meta_anual * 100) if meta_anual else 0.0
@@ -96,7 +103,7 @@ def metas(clientes: pd.DataFrame) -> None:
     # em checklist antigo até pré-descarte, o que superestima a chance
     # de bater a meta.
     disponivel = clientes[
-        (~clientes["ajuizado"])
+        (~clientes["protocolado"])
         & (clientes["honorario_total"] > 0)
         & (~clientes["encerrado"])
     ].copy()
@@ -121,7 +128,8 @@ def metas(clientes: pd.DataFrame) -> None:
 
     colunas = st.columns(4)
     ui.cartao(colunas[0], "Realizado no ano", formatar_moeda(realizado),
-              f"{len(ajuizados)} ajuizamento(s) em {ano}.")
+              f"{len(ajuizados)} protocolado(s) em {ano}. Conta só status "
+              "Protocolado (ou Concluído) com data de ajuizamento.")
     ui.cartao(colunas[1], "Falta para a meta", formatar_moeda(falta),
               f"{percentual:.1f}% da meta atingido.".replace(".", ","))
     ui.cartao(
@@ -136,6 +144,33 @@ def metas(clientes: pd.DataFrame) -> None:
         f"{meses_restantes} mês(es) restante(s) no ano." if meses_restantes
         else "Ano encerrado.",
     )
+
+    if not pendentes.empty:
+        with st.expander(
+            f"{len(pendentes)} cliente(s) com data de ajuizamento em {ano} mas sem "
+            f"status Protocolado, fora do realizado "
+            f"({formatar_moeda(float(pendentes['honorario_total'].sum()))})"
+        ):
+            st.caption(
+                "Não contam na meta. Se já foram protocolados, corrija o status na "
+                "planilha; se não foram, a data de ajuizamento está adiantada."
+            )
+            ui.tabela_compacta(
+                pendentes.sort_values("honorario_total", ascending=False).assign(
+                    data_txt=lambda d: pd.to_datetime(d["data_ajuizamento"])
+                    .dt.strftime("%d/%m/%Y")
+                ),
+                {
+                    "cliente": "Cliente",
+                    "status": "Status",
+                    "responsavel": "Responsável",
+                    "data_txt": "Data do ajuizamento",
+                    "honorario_total": "Honorários previstos (R$)",
+                    "link_bitrix": "Bitrix",
+                    "linha_origem": "Linha",
+                },
+                moedas=["honorario_total"],
+            )
 
     if falta <= 0:
         st.success(
@@ -550,7 +585,7 @@ def painel(clientes: pd.DataFrame) -> None:
     # FILTRADOS: a carteira inteira do recorte, incluindo quem ainda
     # não foi protocolado. O filtro de data preserva de propósito quem
     # não tem data, senão minuta e checklist sumiriam da tela.
-    ajuizados = filtrados[filtrados["ajuizado"]]
+    ajuizados = filtrados[filtrados["protocolado"]]
     realizado = ajuizados["honorario_total"].sum()
     carteira = filtrados["honorario_total"].sum()
     media = realizado / len(ajuizados) if len(ajuizados) else 0
@@ -589,7 +624,8 @@ def painel(clientes: pd.DataFrame) -> None:
         f"Calculada sobre {len(dias)} caso(s) com as duas datas.",
     )
 
-    base = filtrados.dropna(subset=["data_ajuizamento"]).copy()
+    # Matrizes por mês: só protocolados de fato, com o mesmo critério da meta.
+    base = filtrados[filtrados["protocolado"]].copy()
 
     esquerda, direita = st.columns(2)
     with esquerda:
@@ -672,7 +708,7 @@ def painel(clientes: pd.DataFrame) -> None:
         base,
         "competencia_ajuizamento",
         "responsavel",
-        "ajuizado",
+        "protocolado",
         "Mês",
         formato="inteiro",
     )

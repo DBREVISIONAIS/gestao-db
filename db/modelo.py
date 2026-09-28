@@ -385,6 +385,16 @@ def carregar_clientes() -> pd.DataFrame:
                 ),
                 "encerrado": normalizar_texto(status) in STATUS_ENCERRADOS_CLIENTES,
                 "ajuizado": pd.notna(converter_data_segura(data_ajuizamento)),
+                # Protocolado de fato: data de ajuizamento preenchida, que
+                # situa o caso no mês, e status PROTOCOLADO (ou CONCLUÍDO,
+                # que só existe depois do protocolo). Data preenchida com
+                # status PROTOCOLAR, MINUTA etc. é cadastro adiantado, não
+                # receita realizada, e não conta na meta.
+                "protocolado": (
+                    pd.notna(converter_data_segura(data_ajuizamento))
+                    and any(t in normalizar_texto(status)
+                            for t in ("PROTOCOLAD", "CONCLUID"))
+                ),
                 "possui_calculo": valor_preenchido(calculo_real) or valor_ajuizado != 0,
                 "data_referencia": data_referencia,
             }

@@ -120,7 +120,10 @@ def painel(resultados: pd.DataFrame) -> None:
         if motivos_serie.empty:
             st.info("Nenhum motivo registrado no recorte.")
         else:
-            st.dataframe(motivos_serie, width="stretch", hide_index=True)
+            ui.tabela_compacta(
+                motivos_serie, {"Motivo": "Motivo", "Quantidade": "Quantidade"},
+                inteiros=["Quantidade"],
+            )
 
     esquerda, direita = st.columns(2)
 
@@ -149,16 +152,10 @@ def painel(resultados: pd.DataFrame) -> None:
             .reset_index(name="Quantidade")
             .sort_values("Quantidade", ascending=False)
         )
-        st.dataframe(
-            serie.rename(
-                columns={
-                    "categoria": "Evento",
-                    "resultado": "Resultado",
-                }
-            ),
-            width="stretch",
-            hide_index=True,
-            height=360,
+        ui.tabela_compacta(
+            serie,
+            {"categoria": "Evento", "resultado": "Resultado", "Quantidade": "Quantidade"},
+            inteiros=["Quantidade"],
         )
 
     st.markdown("#### Resultados por responsável")

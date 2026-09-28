@@ -175,8 +175,21 @@ def _etapas(permanencia: pd.DataFrame) -> None:
 
     esquerda, direita = st.columns([3, 2])
     with esquerda:
-        ui.tabela(
-            resumo,
+        # Total: média ponderada pelos ciclos, não a média das médias.
+        peso = resumo["ciclos"].sum()
+
+        def ponderada(coluna):
+            return (
+                f"{(resumo[coluna] * resumo['ciclos']).sum() / peso:.1f}".replace(".", ",")
+                if peso else "—"
+            )
+
+        exibir = resumo.assign(
+            media_corridos=resumo["media_corridos"].map(lambda v: f"{v:.1f}".replace(".", ",")),
+            media_uteis=resumo["media_uteis"].map(lambda v: f"{v:.1f}".replace(".", ",")),
+        )
+        ui.tabela_compacta(
+            exibir,
             {
                 "etapa": "Etapa",
                 "ciclos": "Ciclos completos",
@@ -184,7 +197,11 @@ def _etapas(permanencia: pd.DataFrame) -> None:
                 "media_uteis": "Média úteis",
                 "atuais": "Atualmente na etapa",
             },
-            "Sem etapas no recorte.",
+            inteiros=["ciclos", "atuais"],
+            alinhar_direita=["media_corridos", "media_uteis"],
+            valores_total={"media_corridos": ponderada("media_corridos"),
+                           "media_uteis": ponderada("media_uteis")},
+            vazio="Sem etapas no recorte.",
         )
     with direita:
         grafico = resumo[resumo["media_corridos"] > 0]
@@ -206,20 +223,26 @@ def _quem_edita(logs: pd.DataFrame, transicoes: pd.DataFrame) -> None:
     with esquerda:
         st.markdown("#### Ranking de edições")
         ranking = (
-            logs.groupby("editor").size().reset_index(name="Total de edições")
-            .sort_values("Total de edições", ascending=False)
-            .rename(columns={"editor": "Editor"})
+            logs.groupby("editor").size().reset_index(name="edicoes")
+            .sort_values("edicoes", ascending=False)
         )
-        st.dataframe(ranking, width="stretch", hide_index=True, height=320)
+        ui.tabela_compacta(
+            ui.limitar_com_demais(ranking, 15, "editor", ["edicoes"]),
+            {"editor": "Editor", "edicoes": "Total de edições"},
+            inteiros=["edicoes"],
+        )
 
     with direita:
         st.markdown("#### Campos mais alterados")
         campos = (
-            logs.groupby("cabecalho").size().reset_index(name="Quantidade")
-            .sort_values("Quantidade", ascending=False)
-            .rename(columns={"cabecalho": "Campo"})
+            logs.groupby("cabecalho").size().reset_index(name="quantidade")
+            .sort_values("quantidade", ascending=False)
         )
-        st.dataframe(campos, width="stretch", hide_index=True, height=320)
+        ui.tabela_compacta(
+            ui.limitar_com_demais(campos, 15, "cabecalho", ["quantidade"]),
+            {"cabecalho": "Campo", "quantidade": "Quantidade"},
+            inteiros=["quantidade"],
+        )
 
     if transicoes.empty:
         return
@@ -229,11 +252,12 @@ def _quem_edita(logs: pd.DataFrame, transicoes: pd.DataFrame) -> None:
         transicoes.groupby(["editor", "de", "para"]).size().reset_index(name="Quantidade")
         .sort_values("Quantidade", ascending=False)
     )
-    ui.tabela(
-        matriz.head(40),
+    ui.tabela_compacta(
+        ui.limitar_com_demais(matriz, 40, "editor", ["Quantidade"]),
         {"editor": "Editor", "de": "Etapa anterior", "para": "Nova etapa",
          "Quantidade": "Quantidade"},
-        "Sem transições no recorte.",
+        inteiros=["Quantidade"],
+        vazio="Sem transições no recorte.",
     )
 
 

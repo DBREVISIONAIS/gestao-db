@@ -1383,10 +1383,14 @@ def _medias(recorte: pd.DataFrame, equipe: list, inicio: pd.Timestamp,
     media_semana["dia_semana"] = media_semana["dia_semana"].map(lambda d: DIAS[d])
     for codigo in TODOS_EVENTOS:
         media_semana[codigo] = media_semana[codigo].map(decimal)
+    # Linha final: média de todos os dias úteis do período.
     ui.tabela_compacta(
         media_semana,
         {"dia_semana": "Dia", **TODOS_EVENTOS},
-        total=False,
+        alinhar_direita=list(TODOS_EVENTOS),
+        somar=[],
+        valores_total={c: decimal(diario[c].mean()) for c in TODOS_EVENTOS},
+        rotulo_total="MÉDIA GERAL",
     )
 
     # Por pessoa: média nos dias em que a pessoa trabalhou no controle.
@@ -1407,11 +1411,21 @@ def _medias(recorte: pd.DataFrame, equipe: list, inicio: pd.Timestamp,
     medias = medias.map(decimal)
     medias.insert(0, "dias", dias_ativos)
     medias = medias.reset_index()
+    # Linha final: o grupo inteiro, somando o que todos registraram e
+    # dividindo pelos dias em que houve registro de alguém.
+    dias_grupo = pessoas["dia"].nunique()
     ui.tabela_compacta(
         medias,
         {"editor": "Pessoa", "dias": "Dias com registro", **TODOS_EVENTOS},
         inteiros=["dias"],
-        total=False,
+        alinhar_direita=list(TODOS_EVENTOS),
+        somar=[],
+        valores_total={
+            "dias": dias_grupo,
+            **{c: decimal(contagem[c].sum() / dias_grupo) if dias_grupo else "—"
+               for c in TODOS_EVENTOS},
+        },
+        rotulo_total="GRUPO",
     )
     st.caption(
         "Dias com registro: dias (inclusive fim de semana) com pelo menos um registro da pessoa no controle de "
@@ -1626,10 +1640,18 @@ def _mensal(eventos: pd.DataFrame, equipe: list) -> None:
         media = matriz.div(uteis, axis=0)
         exibicao = media.map(lambda v: "—" if v == 0 else f"{v:.1f}".replace(".", ","))
         exibicao.insert(0, "rotulo", [_rotulo_mes(m) for m in exibicao.index])
+        # Linha final: o período inteiro, total dividido por todos os dias úteis.
+        dias_totais = uteis.sum()
         ui.tabela_compacta(
             exibicao.reset_index(drop=True),
             {"rotulo": "Mês", **{p: p for p in pessoas}, "TOTAL": "TOTAL"},
-            total=False,
+            alinhar_direita=pessoas + ["TOTAL"],
+            somar=[],
+            valores_total={
+                c: f"{matriz[c].sum() / dias_totais:.1f}".replace(".", ",")
+                for c in pessoas + ["TOTAL"]
+            },
+            rotulo_total="MÉDIA GERAL",
         )
         st.caption("Média = total do mês dividido pelos dias úteis do mês (sem feriados).")
     else:

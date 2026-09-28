@@ -236,14 +236,15 @@ def painel(prazos: pd.DataFrame) -> None:
             .reset_index(name="Quantidade")
             .sort_values("Quantidade", ascending=False)
         )
-        ui.tabela(
+        ui.tabela_compacta(
             composicao,
             {
                 "situacao_fatal": "Situação do fatal",
                 "fonte_data": "Fonte da data",
                 "Quantidade": "Quantidade",
             },
-            "Sem registros no filtro.",
+            inteiros=["Quantidade"],
+            vazio="Sem registros no filtro.",
         )
     with direita:
         st.markdown("#### Aguarda por responsável")

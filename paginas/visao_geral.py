@@ -88,10 +88,9 @@ def render(prazos: pd.DataFrame, clientes: pd.DataFrame) -> None:
 
     if not clientes.empty and regras["ver_financeiro"]:
         with direita:
-            st.markdown("#### Honorários protocolados por mês")
-            base = clientes[clientes["protocolado"]].dropna(
-                subset=["data_ajuizamento"]
-            ).copy()
+            st.markdown("#### Honorários previstos por mês de ajuizamento")
+            # Mesmo critério da meta: só protocolado de fato.
+            base = clientes[clientes["protocolado"]].copy()
             if base.empty:
                 st.info("Nenhum ajuizamento com data preenchida.")
             else:
