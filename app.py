@@ -333,9 +333,9 @@ ROTULO_CURTO = {
 
 
 def _rotulo_pagina(pagina: str) -> str:
-    rotulo = ROTULO_CURTO.get(pagina, pagina)
-    # Ícone de cadeado no traço do tema, em vez do emoji colorido.
-    return f":material/lock: {rotulo}" if auth.pagina_protegida(pagina) else rotulo
+    # Sem ícone de cadeado: a página de gestão aparece igual às outras e
+    # pede a senha ao ser aberta.
+    return ROTULO_CURTO.get(pagina, pagina)
 
 
 def barra_superior(usuario: dict) -> str:
