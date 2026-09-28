@@ -164,6 +164,26 @@ TENTATIVAS_MAXIMAS = 5
 BLOQUEIO_MINUTOS = 5
 
 
+def _segredo(nome: str) -> str:
+    """
+    Lê um valor dos Secrets. Procura primeiro no nível principal e, se não
+    achar, dentro dos blocos [..]. No TOML, uma linha escrita abaixo de um
+    cabeçalho como [sistemas] passa a pertencer àquele bloco, e esse é o
+    erro mais comum ao colar uma senha nova no fim dos Secrets.
+    """
+    try:
+        valor = st.secrets.get(nome)
+        if valor:
+            return str(valor).strip()
+        for chave in st.secrets.keys():
+            bloco = st.secrets.get(chave)
+            if hasattr(bloco, "get") and bloco.get(nome):
+                return str(bloco.get(nome)).strip()
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
+
+
 def paginas_gestao() -> tuple:
     try:
         configuradas = st.secrets.get("PAGINAS_GESTAO")
@@ -193,11 +213,11 @@ def tela_senha_gestao(pagina: str) -> None:
     import time
 
     st.subheader(pagina)
-    guardada = str(st.secrets.get("SENHA_GESTAO", "") or "")
+    guardada = _segredo("SENHA_GESTAO")
     if not guardada:
         st.warning(
-            "Esta página faz parte da área de gestão, que ainda não tem senha "
-            "configurada. Peça ao administrador para incluir SENHA_GESTAO nos Secrets."
+            "A senha de gestão não foi encontrada nos Secrets. Confira se a linha "
+            "SENHA_GESTAO está escrita exatamente assim, com as aspas, e salve de novo."
         )
         return
 

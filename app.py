@@ -322,6 +322,22 @@ def limpar_tudo() -> None:
     bitrix.limpar_cache()
 
 
+# Rótulos mais curtos na barra, para as páginas caberem numa linha. O
+# nome completo continua sendo o usado nos Secrets e nos perfis.
+ROTULO_CURTO = {
+    "Clientes e processos": "Clientes/processos",
+    "Logs e ciclos": "Logs",
+    "Histórico e auditoria": "Auditoria",
+    "Controladoria": "Controladoria",
+}
+
+
+def _rotulo_pagina(pagina: str) -> str:
+    rotulo = ROTULO_CURTO.get(pagina, pagina)
+    # Ícone de cadeado no traço do tema, em vez do emoji colorido.
+    return f":material/lock: {rotulo}" if auth.pagina_protegida(pagina) else rotulo
+
+
 def barra_superior(usuario: dict) -> str:
     """
     Navegacao no topo, em vez de barra lateral.
@@ -346,7 +362,7 @@ def barra_superior(usuario: dict) -> str:
             key="pagina_atual",
             label_visibility="collapsed",
             # Cadeado nas páginas de gestão enquanto a senha não é digitada.
-            format_func=lambda p: f"🔒 {p}" if auth.pagina_protegida(p) else p,
+            format_func=_rotulo_pagina,
         )
     with acoes:
         atualizar, sair = st.columns(2, gap="small")
