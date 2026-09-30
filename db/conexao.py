@@ -51,7 +51,7 @@ def _cliente_gspread():
 
 
 @st.cache_resource(ttl=TTL_CACHE, show_spinner=False)
-def ler_aba(id_planilha: str, nome_aba: str) -> list[list[str]]:
+def ler_aba(id_planilha: str, nome_aba: str, bruto: bool = False) -> list[list]:
     """
     Devolve a matriz bruta da aba, com a primeira linha de cabecalhos.
 
@@ -81,6 +81,14 @@ def ler_aba(id_planilha: str, nome_aba: str) -> list[list[str]]:
             f"A aba '{nome_aba}' nao existe na planilha {id_planilha}."
         ) from erro
 
+    if bruto:
+        # Valores sem formatação: números com todas as casas decimais,
+        # como a planilha guarda. Os formatados vêm arredondados em cada
+        # célula, e somar valores já arredondados dá diferença de centavos
+        # em relação ao SOMA da planilha, que usa o valor completo.
+        return aba.get_all_values(
+            value_render_option=gspread.utils.ValueRenderOption.unformatted
+        )
     return aba.get_all_values()
 
 

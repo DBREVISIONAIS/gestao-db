@@ -43,6 +43,7 @@ ABA_LOG = "LOG_ALTERACOES"
 ABA_BASE_IDS = "BI_BASE_IDS"
 ABA_CONTROLE = "CONTROLE_BI"
 ABA_DE_PARA = "DE_PARA"
+ABA_METAS = "METAS"
 
 STATUS_ENCERRADOS_PRAZOS = {"PROTOCOLADO", "CONCLUIDO", "OK"}
 STATUS_ENCERRADOS_CLIENTES = {"PROTOCOLADO", "DESCARTADO", "CONCLUIDO"}
@@ -289,7 +290,31 @@ def carregar_clientes() -> pd.DataFrame:
     mapa = mapa_cabecalhos(matriz[0])
     registros = []
 
+    # Segunda leitura, sem formatação, só para os valores em reais. Sem
+    # ela, cada célula chega arredondada em 2 casas e a soma do painel
+    # difere em centavos da soma da planilha. Se falhar, segue com os
+    # valores formatados.
+    try:
+        matriz_bruta = conexao.ler_aba(
+            conexao.id_planilha_auxiliar(), ABA_CLIENTES, bruto=True
+        )
+    except Exception:  # noqa: BLE001
+        matriz_bruta = None
+
     for indice, linha in enumerate(matriz[1:], start=2):
+        bruta = (
+            matriz_bruta[indice - 1]
+            if matriz_bruta is not None and len(matriz_bruta) >= indice
+            else None
+        )
+
+        def numero(nomes, _linha=linha, _bruta=bruta):
+            if _bruta is not None:
+                valor = valor_por_cabecalho(_bruta, mapa, nomes)
+                if isinstance(valor, (int, float)) and not isinstance(valor, bool):
+                    return float(valor)
+            return converter_numero(valor_por_cabecalho(_linha, mapa, nomes))
+
         cliente = valor_por_cabecalho(linha, mapa, ["CLIENTE", "AUTOR"])
         status = valor_por_cabecalho(linha, mapa, ["STATUS"])
         servico = valor_por_cabecalho(linha, mapa, ["SERVICO"])
@@ -302,15 +327,9 @@ def carregar_clientes() -> pd.DataFrame:
         ):
             continue
 
-        honorario_previsto = converter_numero(
-            valor_por_cabecalho(linha, mapa, ["HONORARIO PREVISTO"])
-        )
-        honorario_sucumbencial = converter_numero(
-            valor_por_cabecalho(linha, mapa, ["HONORARIO SUCUMBENCIAL PREVISTO"])
-        )
-        valor_ajuizado = converter_numero(
-            valor_por_cabecalho(linha, mapa, ["VALOR AJUIZADO CONSOLIDADO"])
-        )
+        honorario_previsto = numero(["HONORARIO PREVISTO"])
+        honorario_sucumbencial = numero(["HONORARIO SUCUMBENCIAL PREVISTO"])
+        valor_ajuizado = numero(["VALOR AJUIZADO CONSOLIDADO"])
         calculo_real = primeiro_preenchido(
             [
                 valor_por_cabecalho_parcial(linha, mapa, "RT CONFIRMADA CONTABILISTA"),
@@ -614,6 +633,41 @@ def carregar_de_para() -> pd.DataFrame:
                 {"nome_prazo": str(prazo).strip(), "nome_cliente": str(cliente).strip()}
             )
     return pd.DataFrame(registros, columns=["nome_prazo", "nome_cliente"])
+
+
+@st.cache_resource(ttl=conexao.TTL_CACHE, show_spinner=False)
+def carregar_metas() -> dict:
+    """
+    Meta anual cadastrada por ano: {2026: 4800000.0, 2027: ...}.
+
+    Duas fontes, nesta ordem de prioridade:
+      1. Aba METAS na planilha auxiliar, com as colunas ANO e META ANUAL.
+         É onde a equipe altera sem mexer no painel.
+      2. Bloco [metas] nos Secrets:  "2026" = 4800000
+    Ano sem meta cadastrada fica de fora, e a tela usa a projeção.
+    """
+    metas: dict = {}
+    try:
+        for ano, valor in dict(st.secrets.get("metas", {}) or {}).items():
+            metas[int(ano)] = float(valor)
+    except Exception:  # noqa: BLE001
+        pass
+
+    try:
+        matriz = conexao.ler_aba(conexao.id_planilha_auxiliar(), ABA_METAS)
+    except Exception:  # noqa: BLE001 - aba opcional
+        return metas
+    if len(matriz) < 2:
+        return metas
+    mapa = mapa_cabecalhos(matriz[0])
+    for linha in matriz[1:]:
+        ano = converter_numero(valor_por_cabecalho(linha, mapa, ["ANO"]))
+        valor = converter_numero(
+            valor_por_cabecalho(linha, mapa, ["META ANUAL", "META"])
+        )
+        if 2000 <= ano <= 2100 and valor > 0:
+            metas[int(ano)] = valor
+    return metas
 
 
 # ------------------------------------------------- estado do espelho

@@ -319,6 +319,7 @@ def limpar_tudo() -> None:
         carregador.clear()
     modelo.estado_do_espelho.clear()
     modelo.carregar_de_para.clear()
+    modelo.carregar_metas.clear()
     bitrix.limpar_cache()
 
 

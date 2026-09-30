@@ -43,6 +43,8 @@ def render(clientes: pd.DataFrame) -> None:
     metas(clientes)
     st.divider()
     painel(clientes)
+    st.divider()
+    metas_e_projecoes(clientes)
 
 
 # ------------------------------------------------------------- metas
@@ -62,14 +64,21 @@ def metas(clientes: pd.DataFrame) -> None:
     controles = st.columns([1, 1.4, 1.4])
     with controles[0]:
         ano = st.selectbox("Ano", anos, index=0, key="meta_ano")
+    cadastradas = _metas_cadastradas()
+    meta_padrao = cadastradas.get(ano) or _projecao_meta(clientes, ano, cadastradas)
     with controles[1]:
+        # Chave por ano: ao trocar o ano, o campo assume a meta daquele ano
+        # em vez de manter o valor digitado para outro.
         meta_anual = st.number_input(
             "Meta anual (R$)",
             min_value=0.0,
-            value=4_800_000.0,
+            value=float(meta_padrao),
             step=100_000.0,
             format="%.2f",
-            key="meta_anual",
+            key=f"meta_anual_{ano}",
+            help="Vem da aba METAS da planilha auxiliar. Sem meta cadastrada para "
+            "o ano, usa a projeção (realizado do ano anterior + crescimento). "
+            "Alterar aqui vale só para esta sessão.",
         )
     with controles[2]:
         meta_mensal = st.number_input(
@@ -78,8 +87,13 @@ def metas(clientes: pd.DataFrame) -> None:
             value=float(meta_anual / 12) if meta_anual else 400_000.0,
             step=50_000.0,
             format="%.2f",
-            key="meta_mensal",
+            key=f"meta_mensal_{ano}_{int(meta_anual)}",
             help="Serve só de linha de comparação. O que fecha o ano é a meta anual.",
+        )
+    if ano not in cadastradas:
+        st.caption(
+            f"Não há meta cadastrada para {ano}; o valor acima é a projeção. "
+            "Para fixar, preencha a aba METAS da planilha auxiliar."
         )
 
     # Realizado: só o que está protocolado de fato (ver modelo.py). Quem tem
@@ -294,6 +308,65 @@ def _composicao_por_nucleo(ajuizados, pipeline, meta_anual, falta) -> None:
         )
 
 
+def _pct(valor) -> str:
+    try:
+        return f"{float(valor):.1f}%".replace(".", ",")
+    except (TypeError, ValueError):
+        return "—"
+
+
+# Meta de 2026 já definida pelo escritório. Vale enquanto a aba METAS não
+# trouxer um valor para 2026; a aba sempre prevalece.
+METAS_PADRAO = {2026: 4_800_000.0}
+
+
+def _metas_da_planilha() -> dict:
+    try:
+        return dict(modelo.carregar_metas())
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _metas_cadastradas() -> dict:
+    return {**METAS_PADRAO, **_metas_da_planilha()}
+
+
+def _origem_meta(ano: int) -> str:
+    if ano in _metas_da_planilha():
+        return "Aba METAS"
+    if ano in METAS_PADRAO:
+        return "Padrão do painel"
+    return "—"
+
+
+def _realizado_por_ano(clientes: pd.DataFrame) -> pd.Series:
+    base = clientes[clientes["protocolado"]]
+    return base.groupby("ano_ajuizamento")["honorario_total"].sum()
+
+
+def _projecao_meta(clientes, ano, cadastradas, crescimento: float = 0.30) -> float:
+    """
+    Meta de um ano sem meta cadastrada: realizado do ano anterior mais o
+    crescimento. Se o ano anterior ainda está em curso, usa o ritmo dele
+    (realizado dividido pelos meses decorridos, vezes 12).
+    """
+    realizado = _realizado_por_ano(clientes)
+    anterior = ano - 1
+    base = _fechamento_estimado(realizado.get(anterior, 0.0), anterior)
+    if not base:
+        base = cadastradas.get(anterior, 0.0)
+    return round(base * (1 + crescimento), 2) if base else 4_800_000.0
+
+
+def _fechamento_estimado(realizado_ano: float, ano: int) -> float:
+    hoje = date.today()
+    if ano == hoje.year and hoje.month > 0:
+        # Mês corrente conta pela fração de dias já passados.
+        decorridos = (hoje.month - 1) + hoje.day / 30.0
+        return realizado_ano / decorridos * 12 if decorridos else 0.0
+    return float(realizado_ano)
+
+
 def _evolucao(ajuizados, meta_anual, meta_mensal, ano) -> None:
     st.markdown("#### Evolução acumulada no ano")
 
@@ -345,18 +418,67 @@ def _evolucao(ajuizados, meta_anual, meta_mensal, ano) -> None:
     )
     st.plotly_chart(figura, width="stretch")
 
-    with st.expander("Tabela da evolução", expanded=False):
-        ui.tabela_compacta(
-            mensal,
-            {
-                "competencia_ajuizamento": "Mês",
-                "honorario_total": "No mês (R$)",
-                "acumulado": "Acumulado (R$)",
-                "meta_acumulada": "Meta acumulada (R$)",
-            },
-            moedas=["honorario_total", "acumulado", "meta_acumulada"],
-            somar=["honorario_total"],
+    # Tabela sempre aberta, com a leitura de cada mês: se o acumulado já
+    # alcançou a meta acumulada e quanto da meta do ano ele representa.
+    mensal["meta_mes_ok"] = mensal["honorario_total"] >= meta_mensal
+    mensal["pct_mes"] = mensal["honorario_total"] / meta_mensal * 100 if meta_mensal else pd.NA
+    mensal["diferenca"] = mensal["acumulado"] - mensal["meta_acumulada"]
+    mensal["pct_anual"] = mensal["acumulado"] / meta_anual * 100 if meta_anual else pd.NA
+    mensal["situacao"] = [
+        "✓ Acima da meta" if d >= 0 else "✗ Abaixo da meta" for d in mensal["diferenca"]
+    ]
+    mensal["diferenca_txt"] = mensal["diferenca"].map(
+        lambda v: ("+" if v >= 0 else "−") + ui.moeda_cheia(abs(v)) if v else "0,00"
+    )
+
+    ultimo = mensal.iloc[-1]
+    if ultimo["diferenca"] >= 0:
+        st.success(
+            f"Até {ultimo['competencia_ajuizamento']}, o acumulado está "
+            f"{ui.moeda_cheia(ultimo['diferenca'], True)} acima da meta acumulada. "
+            f"{_pct(ultimo['pct_anual'])} da meta anual já atingidos."
         )
+    else:
+        st.warning(
+            f"Até {ultimo['competencia_ajuizamento']}, o acumulado está "
+            f"{ui.moeda_cheia(abs(ultimo['diferenca']), True)} abaixo da meta acumulada. "
+            f"{_pct(ultimo['pct_anual'])} da meta anual atingidos."
+        )
+
+    meses_batidos = int(mensal["meta_mes_ok"].sum())
+    ui.tabela_compacta(
+        mensal,
+        {
+            "competencia_ajuizamento": "Mês",
+            "honorario_total": "No mês (R$)",
+            "pct_mes": "% da meta do mês",
+            "acumulado": "Acumulado (R$)",
+            "meta_acumulada": "Meta acumulada (R$)",
+            "diferenca_txt": "Diferença (R$)",
+            "pct_anual": "% da meta anual",
+            "situacao": "Situação",
+        },
+        moedas=["honorario_total", "acumulado", "meta_acumulada"],
+        percentuais=["pct_mes", "pct_anual"],
+        alinhar_direita=["diferenca_txt"],
+        somar=["honorario_total"],
+        valores_total={
+            "acumulado": ultimo["acumulado"],
+            "meta_acumulada": ultimo["meta_acumulada"],
+            "diferenca_txt": ultimo["diferenca_txt"],
+            "pct_anual": ultimo["pct_anual"],
+            "situacao": (
+                ("✓ Em dia" if ultimo["diferenca"] >= 0 else "✗ Abaixo")
+                + f" · {meses_batidos}/{len(mensal)} meses na meta"
+            ),
+        },
+    )
+    st.caption(
+        "% da meta do mês: o valor do mês contra a meta mensal de referência. "
+        "Diferença: acumulado menos meta acumulada. % da meta anual: quanto do "
+        "objetivo do ano o acumulado já representa."
+    )
+
 
 def _entrada_no_status(pipeline: pd.DataFrame) -> tuple[pd.Series, object]:
     """
@@ -712,3 +834,130 @@ def painel(clientes: pd.DataFrame) -> None:
         "Mês",
         formato="inteiro",
     )
+
+
+
+# ------------------------------------------------- metas e projeções
+
+
+@st.fragment
+def metas_e_projecoes(clientes: pd.DataFrame) -> None:
+    """
+    Metas de todos os anos lado a lado com o realizado, e a projeção dos
+    próximos anos com crescimento sobre o fechamento do ano atual.
+    """
+    st.markdown("### Metas e projeções")
+    st.caption(
+        "Realizado: só protocolados de fato. Meta cadastrada: aba METAS da "
+        "planilha auxiliar (colunas ANO e META ANUAL). Os anos futuros sem meta "
+        "cadastrada recebem a projeção."
+    )
+
+    cadastradas = _metas_cadastradas()
+    realizado = _realizado_por_ano(clientes)
+    hoje = date.today()
+
+    controles = st.columns([1, 1, 2])
+    with controles[0]:
+        crescimento = st.number_input(
+            "Crescimento ao ano (%)", min_value=0.0, max_value=300.0, value=30.0,
+            step=5.0, key="proj_crescimento",
+        ) / 100
+    with controles[1]:
+        horizonte = st.number_input(
+            "Anos à frente", min_value=1, max_value=5, value=3, step=1,
+            key="proj_horizonte",
+        )
+    with controles[2]:
+        base_escolhida = st.radio(
+            "Base da projeção do ano atual",
+            ["Fechamento estimado pelo ritmo", "Realizado até hoje"],
+            horizontal=True, key="proj_base",
+            help="O ano atual ainda não terminou. Pelo ritmo, o realizado até hoje "
+            "é projetado para 12 meses; a outra opção usa só o que já foi realizado.",
+        )
+
+    anos_passados = sorted(
+        {int(a) for a in realizado.index if pd.notna(a)} | set(cadastradas)
+    )
+    anos_passados = [a for a in anos_passados if a <= hoje.year]
+    linhas = []
+    for ano in anos_passados:
+        feito = float(realizado.get(ano, 0.0))
+        meta = cadastradas.get(ano)
+        estimado = _fechamento_estimado(feito, ano) if ano == hoje.year else feito
+        linhas.append({
+            "ano": str(ano) + (" (em curso)" if ano == hoje.year else ""),
+            "meta": meta if meta else pd.NA,
+            "origem": _origem_meta(ano),
+            "realizado": feito,
+            "pct": feito / meta * 100 if meta else pd.NA,
+            "estimado": estimado,
+            "pct_estimado": estimado / meta * 100 if meta else pd.NA,
+            "situacao": (
+                "" if not meta else
+                ("✓ Batida" if feito >= meta else
+                 ("✗ Não batida" if ano < hoje.year else
+                  ("◐ No ritmo de bater" if estimado >= meta else "◐ Abaixo do ritmo")))
+            ),
+        })
+
+    atual = float(realizado.get(hoje.year, 0.0))
+    base = _fechamento_estimado(atual, hoje.year) if base_escolhida.startswith("Fech") else atual
+    projetado = base
+    for passo in range(1, int(horizonte) + 1):
+        ano = hoje.year + passo
+        projetado = projetado * (1 + crescimento)
+        meta = cadastradas.get(ano)
+        linhas.append({
+            "ano": str(ano),
+            "meta": meta if meta else projetado,
+            "origem": _origem_meta(ano) if meta else f"Projeção (+{crescimento * 100:.0f}% a.a.)",
+            "realizado": pd.NA,
+            "pct": pd.NA,
+            "estimado": pd.NA,
+            "pct_estimado": pd.NA,
+            "situacao": "",
+        })
+        if meta:
+            projetado = meta  # o ano seguinte parte da meta cadastrada
+
+    tabela = pd.DataFrame(linhas)
+    ui.tabela_compacta(
+        tabela,
+        {
+            "ano": "Ano",
+            "meta": "Meta (R$)",
+            "origem": "Origem da meta",
+            "realizado": "Realizado (R$)",
+            "pct": "% atingido",
+            "estimado": "Fechamento estimado (R$)",
+            "pct_estimado": "% estimado",
+            "situacao": "Situação",
+        },
+        moedas=["meta", "realizado", "estimado"],
+        percentuais=["pct", "pct_estimado"],
+        total=False,
+    )
+    st.caption(
+        f"Fechamento estimado do ano em curso: realizado até hoje "
+        f"({ui.moeda_cheia(atual, True)}) dividido pelos meses decorridos e "
+        f"multiplicado por 12 ({ui.moeda_cheia(_fechamento_estimado(atual, hoje.year), True)}). "
+        "Projeção dos anos seguintes: base escolhida acima mais o crescimento ao ano, "
+        "acumulado. Um ano com meta cadastrada passa a ser a base do seguinte."
+    )
+
+    grafico = tabela.copy()
+    grafico["ano_n"] = grafico["ano"].str.slice(0, 4)
+    figura = go.Figure()
+    figura.add_bar(x=grafico["ano_n"], y=pd.to_numeric(grafico["meta"], errors="coerce"),
+                   name="Meta", marker_color="#C1B7AD")
+    figura.add_bar(x=grafico["ano_n"], y=pd.to_numeric(grafico["realizado"], errors="coerce"),
+                   name="Realizado", marker_color="#1A3762")
+    figura.add_scatter(x=grafico["ano_n"],
+                       y=pd.to_numeric(grafico["estimado"], errors="coerce"),
+                       name="Fechamento estimado", mode="markers",
+                       marker=dict(color="#F7BD2E", size=12, symbol="diamond"))
+    figura.update_layout(height=340, barmode="group", yaxis_title="R$", xaxis_title="",
+                         legend=dict(orientation="h", y=1.12), separators=",.")
+    st.plotly_chart(figura, width="stretch", key="proj_grafico")
