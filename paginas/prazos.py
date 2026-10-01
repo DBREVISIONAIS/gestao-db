@@ -85,7 +85,11 @@ def mascara_ocultar(dados: pd.DataFrame, expressoes: list, termos_extra: str) ->
     procurar = [p for p in procurar if p]
     if not procurar:
         return pd.Series(False, index=dados.index)
-    texto = dados["conteudo"].astype(str).map(normalizar_texto)
+    # Coluna CONTEÚDO DO PRAZO pura. O campo "conteudo" do painel usa a
+    # observação quando o conteúdo está vazio, e era isso que fazia o
+    # filtro ocultar linhas a mais.
+    coluna = "conteudo_prazo" if "conteudo_prazo" in dados.columns else "conteudo"
+    texto = dados[coluna].astype(str).map(normalizar_texto)
     return texto.apply(lambda t: any(p in t for p in procurar))
 
 
@@ -198,7 +202,8 @@ def painel(prazos: pd.DataFrame) -> None:
                 lista_ocultos.assign(
                     data_txt=lambda d: pd.to_datetime(d["data_controle"]).dt.strftime("%d/%m/%Y")
                 ),
-                {"autor": "Autor", "conteudo": "Conteúdo", "responsavel": "Responsável",
+                {"autor": "Autor", "conteudo_prazo": "Conteúdo do prazo",
+                 "responsavel": "Responsável",
                  "data_txt": "Data de controle", "linha_origem": "Linha"},
                 total=False,
             )

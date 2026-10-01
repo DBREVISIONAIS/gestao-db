@@ -116,9 +116,12 @@ def carregar_prazos() -> pd.DataFrame:
             linha, mapa, ["FATAL", "PRAZO FATAL", "DATA FATAL"]
         )
         observacao = valor_por_cabecalho(linha, mapa, ["OBSERVACAO"])
-        conteudo = primeiro_preenchido(
-            [valor_por_cabecalho(linha, mapa, ["CONTEUDO DO PRAZO"]), observacao]
-        )
+        # Só a coluna CONTEÚDO DO PRAZO, sem o reforço da observação. Usado
+        # pelos filtros que precisam bater com a contagem feita na planilha.
+        conteudo_prazo = str(
+            valor_por_cabecalho(linha, mapa, ["CONTEUDO DO PRAZO"]) or ""
+        ).strip()
+        conteudo = primeiro_preenchido([conteudo_prazo, observacao])
         status = valor_por_cabecalho(linha, mapa, ["STATUS"])
 
         if not any(
@@ -183,6 +186,7 @@ def carregar_prazos() -> pd.DataFrame:
                 "data_final": converter_data_segura(data_final),
                 "prazo_fatal": converter_data_segura(prazo_fatal),
                 "conteudo": str(conteudo).strip(),
+                "conteudo_prazo": conteudo_prazo,
                 "observacao": str(observacao).strip(),
                 "responsavel": str(responsavel).strip() or "SEM RESPONSÁVEL",
                 "delegado": str(valor_por_cabecalho(linha, mapa, ["DELEGADO"])).strip(),
