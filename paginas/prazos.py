@@ -66,48 +66,27 @@ def render(prazos: pd.DataFrame) -> None:
     painel(prazos)
 
 
-# Compromissos que se aguardam em vez de se peticionar. Reconhecidos por
-# termos no conteúdo do prazo, os mesmos usados na Controladoria.
-OCULTAVEIS = {
-    "Audiência": ("AUDIENCIA",),
-    "Sessão de julgamento": ("SESSAO", "PAUTA", "JULGAMENTO VIRTUAL", "SUSTENTACAO ORAL"),
-    "Perícia": ("PERICIA", "PERITO", "PERICIAL"),
-}
-
-
-# Prazo que pede ação (manifestar sobre o laudo, apresentar quesitos,
-# memoriais, rol de testemunhas, recurso...) nunca é ocultado pelo tipo,
-# mesmo mencionando audiência, sessão ou perícia: é prazo peticionável.
-TERMOS_DE_ACAO = (
-    "MANIFEST", "IMPUGN", "QUESITO", "LAUDO", "RECURS", "CONTRARRAZ", "EMBARG",
-    "MEMORIA", "ROL DE TESTEMUNHA", "RESPOST", "JUNTAR", "JUNTADA", "EMENDA",
-    "CUMPRIR", "CUMPRIMENTO", "PETICION", "APRESENTAR", "INDICAR", "ASSISTENTE TECNICO",
-    "DEPOSIT", "HONORARIOS PERICIAIS",
+# Compromissos que se aguardam em vez de se peticionar, pela expressão
+# exata que a equipe escreve no CONTEÚDO DO PRAZO. Só o conteúdo é olhado
+# (a observação não), e a expressão tem de aparecer inteira: "SESSÃO" ou
+# "PERITO" soltos não bastam. Assim o filtro oculta exatamente as linhas
+# que alguém contaria procurando essas expressões na planilha.
+OCULTAVEIS = (
+    "SESSÃO DE JULGAMENTO",
+    "PERÍCIA DESIGNADA",
+    "AUDIÊNCIA DESIGNADA",
 )
 
 
-def mascara_ocultar(dados: pd.DataFrame, tipos: list, termos_extra: str) -> pd.Series:
-    """
-    Marca os prazos a ocultar.
-
-    Por tipo: o conteúdo (com a observação) menciona audiência, sessão ou
-    perícia e não menciona nenhuma providência a cumprir. Por termos
-    livres: qualquer um dos termos digitados, sem exceção.
-    """
-    texto = (
-        dados["conteudo"].astype(str) + " "
-        + dados.get("observacao", pd.Series("", index=dados.index)).astype(str)
-    ).map(normalizar_texto)
-    excluir = pd.Series(False, index=dados.index)
-    if tipos:
-        termos_tipo = [t for rotulo in tipos for t in OCULTAVEIS[rotulo]]
-        do_tipo = texto.apply(lambda t: any(x in t for x in termos_tipo))
-        pede_acao = texto.apply(lambda t: any(x in t for x in TERMOS_DE_ACAO))
-        excluir |= do_tipo & ~pede_acao
-    extras = [normalizar_texto(t) for t in str(termos_extra or "").split(",") if t.strip()]
-    if extras:
-        excluir |= texto.apply(lambda t: any(x in t for x in extras))
-    return excluir
+def mascara_ocultar(dados: pd.DataFrame, expressoes: list, termos_extra: str) -> pd.Series:
+    """Marca os prazos cujo conteúdo contém alguma das expressões escolhidas."""
+    procurar = [normalizar_texto(e) for e in expressoes]
+    procurar += [normalizar_texto(t) for t in str(termos_extra or "").split(",") if t.strip()]
+    procurar = [p for p in procurar if p]
+    if not procurar:
+        return pd.Series(False, index=dados.index)
+    texto = dados["conteudo"].astype(str).map(normalizar_texto)
+    return texto.apply(lambda t: any(p in t for p in procurar))
 
 
 @st.fragment
@@ -143,18 +122,15 @@ def painel(prazos: pd.DataFrame) -> None:
             list(OCULTAVEIS),
             key="pz_ocultar",
             placeholder="Nada oculto",
-            help="Tira do painel compromissos que não se peticionam: o ato é "
-            "aguardado, não cumprido por petição. Prazo que pede providência "
-            "(manifestar sobre laudo, quesitos, memoriais, rol de testemunhas, "
-            "recurso) continua aparecendo. Vale para os cartões e a tabela.",
+            help="Oculta os prazos cujo CONTEÚDO contém a expressão inteira, "
+            "como está escrita na planilha (maiúsculas e acentos não importam).",
         )
     with linha_busca[2]:
         termos_extra = st.text_input(
-            "Ocultar também (termos)",
+            "Ocultar também (expressões)",
             key="pz_ocultar_termos",
-            placeholder="ex.: ciência, acórdão",
-            help="Termos separados por vírgula. Prazo cujo conteúdo contenha "
-            "qualquer um deles sai do painel.",
+            placeholder="ex.: ciência do acórdão",
+            help="Expressões separadas por vírgula, procuradas no CONTEÚDO do prazo.",
         )
 
     with st.expander("Filtros", expanded=False):
@@ -209,14 +185,23 @@ def painel(prazos: pd.DataFrame) -> None:
 
     excluir = mascara_ocultar(filtrados, ocultar, termos_extra)
     ocultos = int(excluir.sum())
+    lista_ocultos = filtrados[excluir]
     filtrados = filtrados[~excluir]
 
     ui.resumo_filtro(len(prazos), len(filtrados))
     if ocultos:
-        st.caption(
-            f"{ocultos} prazo(s) ocultos pelo filtro \"Ocultar do painel\". "
-            "Eles continuam no controle; só não aparecem aqui."
-        )
+        with st.expander(
+            f"{ocultos} prazo(s) ocultos pelo filtro \"Ocultar do painel\" — conferir"
+        ):
+            st.caption("Continuam no controle; só não aparecem nos cartões e na tabela.")
+            ui.tabela_compacta(
+                lista_ocultos.assign(
+                    data_txt=lambda d: pd.to_datetime(d["data_controle"]).dt.strftime("%d/%m/%Y")
+                ),
+                {"autor": "Autor", "conteudo": "Conteúdo", "responsavel": "Responsável",
+                 "data_txt": "Data de controle", "linha_origem": "Linha"},
+                total=False,
+            )
 
     abertos = filtrados[~filtrados["encerrado"]]
 
