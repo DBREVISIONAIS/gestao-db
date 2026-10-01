@@ -13,6 +13,7 @@ import plotly.express as px
 import streamlit as st
 
 from db import auth
+from db.normalizacao import normalizar_texto
 from paginas import componentes as ui
 
 ATALHOS = {
@@ -65,6 +66,50 @@ def render(prazos: pd.DataFrame) -> None:
     painel(prazos)
 
 
+# Compromissos que se aguardam em vez de se peticionar. Reconhecidos por
+# termos no conteúdo do prazo, os mesmos usados na Controladoria.
+OCULTAVEIS = {
+    "Audiência": ("AUDIENCIA",),
+    "Sessão de julgamento": ("SESSAO", "PAUTA", "JULGAMENTO VIRTUAL", "SUSTENTACAO ORAL"),
+    "Perícia": ("PERICIA", "PERITO", "PERICIAL"),
+}
+
+
+# Prazo que pede ação (manifestar sobre o laudo, apresentar quesitos,
+# memoriais, rol de testemunhas, recurso...) nunca é ocultado pelo tipo,
+# mesmo mencionando audiência, sessão ou perícia: é prazo peticionável.
+TERMOS_DE_ACAO = (
+    "MANIFEST", "IMPUGN", "QUESITO", "LAUDO", "RECURS", "CONTRARRAZ", "EMBARG",
+    "MEMORIA", "ROL DE TESTEMUNHA", "RESPOST", "JUNTAR", "JUNTADA", "EMENDA",
+    "CUMPRIR", "CUMPRIMENTO", "PETICION", "APRESENTAR", "INDICAR", "ASSISTENTE TECNICO",
+    "DEPOSIT", "HONORARIOS PERICIAIS",
+)
+
+
+def mascara_ocultar(dados: pd.DataFrame, tipos: list, termos_extra: str) -> pd.Series:
+    """
+    Marca os prazos a ocultar.
+
+    Por tipo: o conteúdo (com a observação) menciona audiência, sessão ou
+    perícia e não menciona nenhuma providência a cumprir. Por termos
+    livres: qualquer um dos termos digitados, sem exceção.
+    """
+    texto = (
+        dados["conteudo"].astype(str) + " "
+        + dados.get("observacao", pd.Series("", index=dados.index)).astype(str)
+    ).map(normalizar_texto)
+    excluir = pd.Series(False, index=dados.index)
+    if tipos:
+        termos_tipo = [t for rotulo in tipos for t in OCULTAVEIS[rotulo]]
+        do_tipo = texto.apply(lambda t: any(x in t for x in termos_tipo))
+        pede_acao = texto.apply(lambda t: any(x in t for x in TERMOS_DE_ACAO))
+        excluir |= do_tipo & ~pede_acao
+    extras = [normalizar_texto(t) for t in str(termos_extra or "").split(",") if t.strip()]
+    if extras:
+        excluir |= texto.apply(lambda t: any(x in t for x in extras))
+    return excluir
+
+
 @st.fragment
 def painel(prazos: pd.DataFrame) -> None:
     linha_atalhos = st.columns(2)
@@ -85,12 +130,32 @@ def painel(prazos: pd.DataFrame) -> None:
             label_visibility="collapsed",
         )
 
-    busca = st.text_input(
-        "Buscar",
-        placeholder="Autor, conteúdo, responsável...",
-        key="pz_busca",
-        label_visibility="collapsed",
-    )
+    linha_busca = st.columns([2, 1.3, 1.2])
+    with linha_busca[0]:
+        busca = st.text_input(
+            "Buscar",
+            placeholder="Autor, conteúdo, responsável...",
+            key="pz_busca",
+        )
+    with linha_busca[1]:
+        ocultar = st.multiselect(
+            "Ocultar do painel",
+            list(OCULTAVEIS),
+            key="pz_ocultar",
+            placeholder="Nada oculto",
+            help="Tira do painel compromissos que não se peticionam: o ato é "
+            "aguardado, não cumprido por petição. Prazo que pede providência "
+            "(manifestar sobre laudo, quesitos, memoriais, rol de testemunhas, "
+            "recurso) continua aparecendo. Vale para os cartões e a tabela.",
+        )
+    with linha_busca[2]:
+        termos_extra = st.text_input(
+            "Ocultar também (termos)",
+            key="pz_ocultar_termos",
+            placeholder="ex.: ciência, acórdão",
+            help="Termos separados por vírgula. Prazo cujo conteúdo contenha "
+            "qualquer um deles sai do painel.",
+        )
 
     with st.expander("Filtros", expanded=False):
         linha1 = st.columns(4)
@@ -142,7 +207,16 @@ def painel(prazos: pd.DataFrame) -> None:
     if somente_abertos:
         filtrados = filtrados[~filtrados["encerrado"]]
 
+    excluir = mascara_ocultar(filtrados, ocultar, termos_extra)
+    ocultos = int(excluir.sum())
+    filtrados = filtrados[~excluir]
+
     ui.resumo_filtro(len(prazos), len(filtrados))
+    if ocultos:
+        st.caption(
+            f"{ocultos} prazo(s) ocultos pelo filtro \"Ocultar do painel\". "
+            "Eles continuam no controle; só não aparecem aqui."
+        )
 
     abertos = filtrados[~filtrados["encerrado"]]
 
