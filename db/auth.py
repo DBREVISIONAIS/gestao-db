@@ -146,20 +146,16 @@ def regras_atuais() -> dict:
 #
 # Secrets:
 #   SENHA_GESTAO = "hash SHA-256 (gerar_hash.py)"
-#   PAGINAS_GESTAO = ["Clientes", "Financeiro", ...]   (opcional)
+#   (as páginas livres ficam em PAGINAS_LIVRES, logo abaixo; o resto é gestão)
 #
 # Sem SENHA_GESTAO configurada, as páginas de gestão ficam fechadas para
 # todos: é mais seguro falhar fechado do que abrir por esquecimento.
 # No modo por usuário, o perfil com gestao = true entra sem a segunda senha.
 
-PAGINAS_GESTAO_PADRAO = (
-    "Clientes",
-    "Financeiro",
-    "Resultados",
-    "Produção",
-    "Logs e ciclos",
-    "Histórico e auditoria",
-)
+# Únicas páginas abertas só com a senha de acesso. Todas as demais pedem
+# a senha de gestão, inclusive páginas que forem criadas no futuro: a
+# regra é por exclusão, para nenhuma página nova nascer desprotegida.
+PAGINAS_LIVRES = ("Início", "Visão geral", "Prazos")
 TENTATIVAS_MAXIMAS = 5
 BLOQUEIO_MINUTOS = 5
 
@@ -185,11 +181,7 @@ def _segredo(nome: str) -> str:
 
 
 def paginas_gestao() -> tuple:
-    try:
-        configuradas = st.secrets.get("PAGINAS_GESTAO")
-    except Exception:  # noqa: BLE001
-        configuradas = None
-    return tuple(configuradas) if configuradas else PAGINAS_GESTAO_PADRAO
+    return tuple(p for p in PAGINAS_DISPONIVEIS if p not in PAGINAS_LIVRES)
 
 
 def _perfil_com_gestao() -> bool:
